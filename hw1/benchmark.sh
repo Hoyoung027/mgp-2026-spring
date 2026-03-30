@@ -1,4 +1,11 @@
 #!/bin/bash
+#
+# 실행 방법:
+#   cd hw1
+#   chmod +x benchmark.sh   # 처음 한 번만
+#   ./benchmark.sh
+#
+# 결과: benchmark_results.csv 생성
 
 # 실험 설정
 RUNS=10

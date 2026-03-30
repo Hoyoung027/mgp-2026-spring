@@ -1,3 +1,10 @@
+# 실행 방법:
+#   cd hw1
+#   python3 visualize.py
+#
+# 사전 조건: benchmark.sh 실행 후 benchmark_results.csv 가 있어야 함
+# 결과: benchmark_results.png 저장 및 그래프 창 표시
+
 import csv
 import statistics
 import matplotlib.pyplot as plt
