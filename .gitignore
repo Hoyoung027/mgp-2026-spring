@@ -5,5 +5,3 @@
 !build/
 build/
 hw*/*.markdown
-hw*/*.csv
-hw*/*.png
