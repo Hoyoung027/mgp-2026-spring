@@ -4,3 +4,5 @@
 !hw*/**
 !build/
 build/
+hw*/*.markdown
+
