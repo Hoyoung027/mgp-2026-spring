@@ -5,3 +5,8 @@
 !build/
 build/
 hw*/*.markdown
+hw*/*.pdf
+hw*/*.docx
+hw*/*.doc
+hw*/*.DS_Store
+hw*/*.zip
