@@ -10,3 +10,5 @@ hw*/*.docx
 hw*/*.doc
 hw*/*.DS_Store
 hw*/*.zip
+!mgp*/
+!mgp*/**
