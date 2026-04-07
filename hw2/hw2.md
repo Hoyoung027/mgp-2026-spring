@@ -37,42 +37,54 @@ for i in [i_start, i_end):
     c[i] = a[i][0]*b[0] + a[i][1]*b[1] + ... + a[i][N-1]*b[N-1]
 ```
 
-### Loop Unrolling (ILP)
+### v1: 8-way Scalar Unrolling
 
-각 행의 dot product 계산 시 8개의 독립된 누산기(`sum0`~`sum7`)를 사용해 8-way unrolling을 적용한다.
+각 행의 dot product 계산 시 8개의 독립된 누산기(`sum0`~`sum7`)를 사용해 8-way unrolling을 적용했다.
 
 ```cpp
 float sum0=0, sum1=0, sum2=0, sum3=0, sum4=0, sum5=0, sum6=0, sum7=0;
 for (; k <= N - 8; k += 8) {
     sum0 += ai[k]   * b[k];
     sum1 += ai[k+1] * b[k+1];
-    ...
+    sum2 += ai[k+2] * b[k+2];
+    sum3 += ai[k+3] * b[k+3];
+    sum4 += ai[k+4] * b[k+4];
+    sum5 += ai[k+5] * b[k+5];
+    sum6 += ai[k+6] * b[k+6];
     sum7 += ai[k+7] * b[k+7];
 }
 float sum = (sum0+sum1)+(sum2+sum3)+(sum4+sum5)+(sum6+sum7);
 ```
 
-단순 `sum += ai[k]*b[k]` 는 이전 누적 결과에 의존하므로 CPU가 직렬로 처리한다. 8개의 독립된 누산기를 쓰면 각 FMA 연산이 이전 결과를 기다리지 않아 Instruction-Level Parallelism (ILP)을 활용할 수 있다.
+단순 `sum += ai[k]*b[k]` 는 이전 누적 결과에 의존하므로 CPU가 직렬로 처리한다. 8개의 독립된 누산기를 쓰면 각 FMA 연산이 이전 결과를 기다리지 않아 Instruction-Level Parallelism (ILP)을 활용할 수 있다. 다만 컴파일러 최적화 플래그 없이는 실제 SIMD 명령어로 변환되지 않아 스칼라 연산으로만 동작한다.
 
-### Prefetch
+### v2: SSE2 Intrinsics
 
-현재 행을 계산하는 동안 다음 행을 캐시에 미리 올린다.
+`<immintrin.h>`를 추가하여 SSE2 intrinsic으로 내부 루프를 교체했다. SSE2는 x86-64의 기본 베이스라인이므로 컴파일 플래그나 `pragma`, `__attribute__` 없이도 동작한다.
 
 ```cpp
-if (i + 1 < i_end) {
-    const float *ai_next = a + (i + 1) * N;
-    for (int p = 0; p < N; p += 16)
-        __builtin_prefetch(ai_next + p, 0, 0);
+__m128 vsum0 = _mm_setzero_ps();
+__m128 vsum1 = _mm_setzero_ps();
+
+for (; k <= N - 8; k += 8) {
+    vsum0 = _mm_add_ps(vsum0, _mm_mul_ps(
+        _mm_loadu_ps(ai + k),
+        _mm_loadu_ps(b  + k)));
+    vsum1 = _mm_add_ps(vsum1, _mm_mul_ps(
+        _mm_loadu_ps(ai + k + 4),
+        _mm_loadu_ps(b  + k + 4)));
 }
+
+// horizontal reduction: [v0,v1,v2,v3] -> v0+v1+v2+v3
+__m128 vsum = _mm_add_ps(vsum0, vsum1);
+__m128 tmp  = _mm_shuffle_ps(vsum, vsum, _MM_SHUFFLE(1,0,3,2));
+vsum = _mm_add_ps(vsum, tmp);
+tmp  = _mm_shuffle_ps(vsum, vsum, _MM_SHUFFLE(2,3,0,1));
+vsum = _mm_add_ps(vsum, tmp);
+float sum = _mm_cvtss_f32(vsum);
 ```
 
-행렬 A는 16MB로 캐시에 올라오지 않아 행 전환 시 cache miss가 발생한다. 현재 행 계산(2048 FMA)이 진행되는 동안 다음 행(8KB)을 메모리에서 백그라운드로 캐시에 올려 latency를 은닉한다. 캐시라인이 64 bytes = 16 floats이므로 `p += 16` 간격으로 prefetch한다.
-
-**주의사항:**
-- N=2048 같은 순차 접근 패턴은 하드웨어 prefetcher가 이미 어느 정도 처리 → 효과가 제한적일 수 있다.
-- 행당 128회 `__builtin_prefetch` 호출 자체가 명령어 오버헤드로 작용할 수 있다.
-- prefetch 거리(몇 행 앞)를 너무 크게 잡으면 데이터가 사용 전에 캐시에서 evict되고, 너무 작으면 latency를 충분히 은닉하지 못한다.
-- 실측 없이 효과를 단정하기 어렵고, 서버 환경에 따라 before/after 비교가 필요하다.
+`_mm_loadu_ps`로 4개의 float를 한 번에 로드하고, `_mm_mul_ps` + `_mm_add_ps`로 4-wide 병렬 연산을 수행한다. 2개의 `__m128` 누산기(`vsum0`, `vsum1`)를 사용해 이터레이션당 8 floats를 처리하면서 누산기 간 의존성도 제거했다. 루프 종료 후 shuffle 기반 수평 합산(horizontal reduction)으로 4개 레인의 합을 하나의 scalar로 추출한다.
 
 ### Exact Float Match 보장
 

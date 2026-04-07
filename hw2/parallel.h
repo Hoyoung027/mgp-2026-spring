@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <immintrin.h>
 #include <numeric>
 #include <thread>
 #include <vector>
@@ -61,29 +62,29 @@ inline void gemv(float *a, float *b, float *c, int N) {
 			int i_end    = (tid == num_threads - 1) ? N : i_start + rows_per;
 
 			for (int i = i_start; i < i_end; ++i) {
-				// prefetch next row into cache (cache line = 64 bytes = 16 floats)
-				if (i + 1 < i_end) {
-					const float *ai_next = a + (i + 1) * N;
-					for (int p = 0; p < N; p += 16)
-						__builtin_prefetch(ai_next + p, 0, 0);
-				}
-
-				float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-				float sum4 = 0.0f, sum5 = 0.0f, sum6 = 0.0f, sum7 = 0.0f;
 				const float *ai = a + i * N;
+
+				__m128 vsum0 = _mm_setzero_ps();
+				__m128 vsum1 = _mm_setzero_ps();
+
 				int k = 0;
 				for (; k <= N - 8; k += 8) {
-					sum0 += ai[k]   * b[k];
-					sum1 += ai[k+1] * b[k+1];
-					sum2 += ai[k+2] * b[k+2];
-					sum3 += ai[k+3] * b[k+3];
-					sum4 += ai[k+4] * b[k+4];
-					sum5 += ai[k+5] * b[k+5];
-					sum6 += ai[k+6] * b[k+6];
-					sum7 += ai[k+7] * b[k+7];
+					vsum0 = _mm_add_ps(vsum0, _mm_mul_ps(
+						_mm_loadu_ps(ai + k),
+						_mm_loadu_ps(b  + k)));
+					vsum1 = _mm_add_ps(vsum1, _mm_mul_ps(
+						_mm_loadu_ps(ai + k + 4),
+						_mm_loadu_ps(b  + k + 4)));
 				}
-				float sum = (sum0 + sum1) + (sum2 + sum3) +
-				            (sum4 + sum5) + (sum6 + sum7);
+
+				// horizontal reduction: [v0,v1,v2,v3] -> v0+v1+v2+v3
+				__m128 vsum = _mm_add_ps(vsum0, vsum1);
+				__m128 tmp  = _mm_shuffle_ps(vsum, vsum, _MM_SHUFFLE(1,0,3,2));
+				vsum = _mm_add_ps(vsum, tmp);
+				tmp  = _mm_shuffle_ps(vsum, vsum, _MM_SHUFFLE(2,3,0,1));
+				vsum = _mm_add_ps(vsum, tmp);
+				float sum = _mm_cvtss_f32(vsum);
+
 				for (; k < N; ++k)
 					sum += ai[k] * b[k];
 				c[i] = sum;
