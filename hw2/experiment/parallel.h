@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -49,99 +48,74 @@ inline void gemv(float *a, float *b, float *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	// ── Static thread pool (함수 내부 struct, TODO 영역 안에서 완결) ──────────
-	struct GemvPool {
-		int nt;
-		std::vector<std::thread> workers;
-		std::atomic<float*> g_a{nullptr}, g_b{nullptr}, g_c{nullptr};
-		std::atomic<int>    g_N{0};
-		std::atomic<int>    work_ver{0};  // run()마다 +1 → 워커가 감지
-		std::atomic<int>    done_cnt{0};  // 워커 완료 시 +1
-		std::atomic<bool>   quit{false};
+	int num_threads = (int)std::thread::hardware_concurrency();
+	if (num_threads < 1) num_threads = 1;
+	if (num_threads > 64) num_threads = 64;
 
-		// SSE2 dot-product: 행 [i0, i1) 계산
-		static void compute(float *a, float *b, float *c, int N, int i0, int i1) {
-			for (int i = i0; i < i1; ++i) {
+	// b를 int16으로 quantize (한 번만, 모든 스레드 공유)
+	float max_b = 1e-9f;
+	for (int k = 0; k < N; k++)
+		if (std::abs(b[k]) > max_b) max_b = std::abs(b[k]);
+	const float scale_b     = 32767.0f / max_b;
+	const float inv_scale_b = max_b    / 32767.0f;
+
+	std::vector<int16_t> bq(N);
+	for (int k = 0; k < N; k++)
+		bq[k] = (int16_t)(b[k] * scale_b + (b[k] >= 0 ? 0.5f : -0.5f));
+
+	std::vector<std::thread> threads;
+	threads.reserve(num_threads);
+
+	for (int tid = 0; tid < num_threads; ++tid) {
+		threads.emplace_back([=, &bq]() {
+			int rows_per = N / num_threads;
+			int i_start  = tid * rows_per;
+			int i_end    = (tid == num_threads - 1) ? N : i_start + rows_per;
+
+			std::vector<int16_t> aq(N); // 행 quantization 버퍼 (스레드당 1개)
+
+			for (int i = i_start; i < i_end; ++i) {
 				const float *ai = a + i * N;
-				__m128 vs0 = _mm_setzero_ps(), vs1 = _mm_setzero_ps();
+
+				// 행의 max 탐색 → scale 계산
+				float max_row = 1e-9f;
+				for (int k = 0; k < N; k++)
+					if (std::abs(ai[k]) > max_row) max_row = std::abs(ai[k]);
+				const float scale_row     = 32767.0f / max_row;
+				const float inv_scale_row = max_row    / 32767.0f;
+
+				// 행을 int16으로 quantize
+				for (int k = 0; k < N; k++)
+					aq[k] = (int16_t)(ai[k] * scale_row + (ai[k] >= 0 ? 0.5f : -0.5f));
+
+				// int16 dot product: _mm_madd_epi16
+				// 8개 int16 쌍을 곱한 뒤 인접 쌍을 더해 4개 int32로 누적
+				__m128i vsum = _mm_setzero_si128();
 				int k = 0;
 				for (; k <= N - 8; k += 8) {
-					vs0 = _mm_add_ps(vs0, _mm_mul_ps(_mm_loadu_ps(ai+k),   _mm_loadu_ps(b+k)));
-					vs1 = _mm_add_ps(vs1, _mm_mul_ps(_mm_loadu_ps(ai+k+4), _mm_loadu_ps(b+k+4)));
+					__m128i va = _mm_loadu_si128((const __m128i*)(aq.data() + k));
+					__m128i vb = _mm_loadu_si128((const __m128i*)(bq.data() + k));
+					vsum = _mm_add_epi32(vsum, _mm_madd_epi16(va, vb));
 				}
-				__m128 vs = _mm_add_ps(vs0, vs1);
-				__m128 t  = _mm_shuffle_ps(vs, vs, _MM_SHUFFLE(1,0,3,2));
-				vs = _mm_add_ps(vs, t);
-				t  = _mm_shuffle_ps(vs, vs, _MM_SHUFFLE(2,3,0,1));
-				vs = _mm_add_ps(vs, t);
-				float sum = _mm_cvtss_f32(vs);
-				for (; k < N; ++k) sum += ai[k] * b[k];
-				c[i] = sum;
+
+				// horizontal reduction: 4개 int32 → 1개
+				__m128i tmp = _mm_shuffle_epi32(vsum, _MM_SHUFFLE(1,0,3,2));
+				vsum = _mm_add_epi32(vsum, tmp);
+				tmp  = _mm_shuffle_epi32(vsum, _MM_SHUFFLE(2,3,0,1));
+				vsum = _mm_add_epi32(vsum, tmp);
+				int32_t dot = _mm_cvtsi128_si32(vsum);
+
+				// 나머지 처리
+				for (; k < N; k++)
+					dot += (int32_t)aq[k] * (int32_t)bq[k];
+
+				// dequantize
+				c[i] = (float)dot * inv_scale_row * inv_scale_b;
 			}
-		}
+		});
+	}
 
-		explicit GemvPool(int n) : nt(n) {
-			workers.reserve(n - 1);
-			for (int tid = 1; tid < n; ++tid) {
-				workers.emplace_back([this, tid]() {
-					int seen = 0;
-					while (true) {
-						// spinwait: work_ver가 바뀔 때까지 대기
-						int v;
-						while ((v = work_ver.load(std::memory_order_acquire)) == seen)
-							_mm_pause(); // CPU 반납 없이 스핀, 즉시 반응
-						seen = v;
-						if (quit.load(std::memory_order_relaxed)) return;
-
-						float *a = g_a.load(std::memory_order_relaxed);
-						float *b = g_b.load(std::memory_order_relaxed);
-						float *c = g_c.load(std::memory_order_relaxed);
-						int    N = g_N.load(std::memory_order_relaxed);
-
-						int rows_per = N / nt;
-						int i0 = tid * rows_per;
-						int i1 = (tid == nt - 1) ? N : i0 + rows_per;
-						compute(a, b, c, N, i0, i1);
-
-						done_cnt.fetch_add(1, std::memory_order_release);
-					}
-				});
-			}
-		}
-
-		~GemvPool() {
-			quit.store(true, std::memory_order_relaxed);
-			work_ver.fetch_add(1, std::memory_order_release); // 워커 깨워서 quit 확인
-			for (auto &t : workers) t.join();
-		}
-
-		void run(float *a, float *b, float *c, int N) {
-			g_a.store(a, std::memory_order_relaxed);
-			g_b.store(b, std::memory_order_relaxed);
-			g_c.store(c, std::memory_order_relaxed);
-			g_N.store(N, std::memory_order_relaxed);
-			done_cnt.store(0, std::memory_order_relaxed);
-			work_ver.fetch_add(1, std::memory_order_release); // 워커 깨우기
-
-			// 메인 스레드(tid=0) 담당 행 직접 처리
-			int rows_per = N / nt;
-			compute(a, b, c, N, 0, rows_per);
-
-			// 모든 워커 완료 대기
-			while (done_cnt.load(std::memory_order_acquire) < nt - 1)
-				_mm_pause();
-		}
-	};
-
-	static int nt = [] {
-		int n = (int)std::thread::hardware_concurrency();
-		if (n < 1) n = 1;
-		if (n > 64) n = 64;
-		return n;
-	}();
-	static GemvPool pool(nt); // 첫 호출에만 생성, 이후 재사용
-
-	pool.run(a, b, c, N);
+	for (auto &t : threads) t.join();
 
 	/****************/
 }
