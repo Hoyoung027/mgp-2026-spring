@@ -89,7 +89,7 @@ inline void gemv(float *a, float *b, float *c, int N) {
 						// spinwait: work_ver가 바뀔 때까지 대기
 						int v;
 						while ((v = work_ver.load(std::memory_order_acquire)) == seen)
-							std::this_thread::yield();
+							_mm_pause(); // CPU 반납 없이 스핀, 즉시 반응
 						seen = v;
 						if (quit.load(std::memory_order_relaxed)) return;
 
@@ -129,7 +129,7 @@ inline void gemv(float *a, float *b, float *c, int N) {
 
 			// 모든 워커 완료 대기
 			while (done_cnt.load(std::memory_order_acquire) < nt - 1)
-				std::this_thread::yield();
+				_mm_pause();
 		}
 	};
 
