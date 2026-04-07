@@ -61,6 +61,13 @@ inline void gemv(float *a, float *b, float *c, int N) {
 			int i_end    = (tid == num_threads - 1) ? N : i_start + rows_per;
 
 			for (int i = i_start; i < i_end; ++i) {
+				// prefetch next row into cache (cache line = 64 bytes = 16 floats)
+				if (i + 1 < i_end) {
+					const float *ai_next = a + (i + 1) * N;
+					for (int p = 0; p < N; p += 16)
+						__builtin_prefetch(ai_next + p, 0, 0);
+				}
+
 				float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
 				float sum4 = 0.0f, sum5 = 0.0f, sum6 = 0.0f, sum7 = 0.0f;
 				const float *ai = a + i * N;

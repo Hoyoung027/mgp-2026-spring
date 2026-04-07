@@ -37,6 +37,43 @@ for i in [i_start, i_end):
     c[i] = a[i][0]*b[0] + a[i][1]*b[1] + ... + a[i][N-1]*b[N-1]
 ```
 
+### Loop Unrolling (ILP)
+
+각 행의 dot product 계산 시 8개의 독립된 누산기(`sum0`~`sum7`)를 사용해 8-way unrolling을 적용한다.
+
+```cpp
+float sum0=0, sum1=0, sum2=0, sum3=0, sum4=0, sum5=0, sum6=0, sum7=0;
+for (; k <= N - 8; k += 8) {
+    sum0 += ai[k]   * b[k];
+    sum1 += ai[k+1] * b[k+1];
+    ...
+    sum7 += ai[k+7] * b[k+7];
+}
+float sum = (sum0+sum1)+(sum2+sum3)+(sum4+sum5)+(sum6+sum7);
+```
+
+단순 `sum += ai[k]*b[k]` 는 이전 누적 결과에 의존하므로 CPU가 직렬로 처리한다. 8개의 독립된 누산기를 쓰면 각 FMA 연산이 이전 결과를 기다리지 않아 Instruction-Level Parallelism (ILP)을 활용할 수 있다.
+
+### Prefetch
+
+현재 행을 계산하는 동안 다음 행을 캐시에 미리 올린다.
+
+```cpp
+if (i + 1 < i_end) {
+    const float *ai_next = a + (i + 1) * N;
+    for (int p = 0; p < N; p += 16)
+        __builtin_prefetch(ai_next + p, 0, 0);
+}
+```
+
+행렬 A는 16MB로 캐시에 올라오지 않아 행 전환 시 cache miss가 발생한다. 현재 행 계산(2048 FMA)이 진행되는 동안 다음 행(8KB)을 메모리에서 백그라운드로 캐시에 올려 latency를 은닉한다. 캐시라인이 64 bytes = 16 floats이므로 `p += 16` 간격으로 prefetch한다.
+
+**주의사항:**
+- N=2048 같은 순차 접근 패턴은 하드웨어 prefetcher가 이미 어느 정도 처리 → 효과가 제한적일 수 있다.
+- 행당 128회 `__builtin_prefetch` 호출 자체가 명령어 오버헤드로 작용할 수 있다.
+- prefetch 거리(몇 행 앞)를 너무 크게 잡으면 데이터가 사용 전에 캐시에서 evict되고, 너무 작으면 latency를 충분히 은닉하지 못한다.
+- 실측 없이 효과를 단정하기 어렵고, 서버 환경에 따라 before/after 비교가 필요하다.
+
 ### Exact Float Match 보장
 
 `c[i]`를 계산할 때 k=0부터 N-1까지 순서대로 누적한다. 각 행의 계산이 독립적이고 k 순서가 레퍼런스와 동일하므로 부동소수점 연산 결과가 정확히 일치한다.
