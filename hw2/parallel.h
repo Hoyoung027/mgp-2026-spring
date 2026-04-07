@@ -49,6 +49,7 @@ inline void gemv(float *a, float *b, float *c, int N) {
 
 	int num_threads = (int)std::thread::hardware_concurrency();
 	if (num_threads < 1) num_threads = 1;
+	if (num_threads > 64) num_threads = 64;
 
 	std::vector<std::thread> threads;
 	threads.reserve(num_threads);
@@ -94,6 +95,7 @@ inline void gemm(float *a, float *b, float *c, int N) {
 
 	int num_threads = (int)std::thread::hardware_concurrency();
 	if (num_threads < 1) num_threads = 1;
+	if (num_threads > 64) num_threads = 64;
 
 	std::vector<std::thread> threads;
 	threads.reserve(num_threads);
