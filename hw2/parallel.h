@@ -61,9 +61,24 @@ inline void gemv(float *a, float *b, float *c, int N) {
 			int i_end    = (tid == num_threads - 1) ? N : i_start + rows_per;
 
 			for (int i = i_start; i < i_end; ++i) {
-				float sum = 0.0f;
-				for (int k = 0; k < N; ++k)
-					sum += a[i * N + k] * b[k];
+				float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+				float sum4 = 0.0f, sum5 = 0.0f, sum6 = 0.0f, sum7 = 0.0f;
+				const float *ai = a + i * N;
+				int k = 0;
+				for (; k <= N - 8; k += 8) {
+					sum0 += ai[k]   * b[k];
+					sum1 += ai[k+1] * b[k+1];
+					sum2 += ai[k+2] * b[k+2];
+					sum3 += ai[k+3] * b[k+3];
+					sum4 += ai[k+4] * b[k+4];
+					sum5 += ai[k+5] * b[k+5];
+					sum6 += ai[k+6] * b[k+6];
+					sum7 += ai[k+7] * b[k+7];
+				}
+				float sum = (sum0 + sum1) + (sum2 + sum3) +
+				            (sum4 + sum5) + (sum6 + sum7);
+				for (; k < N; ++k)
+					sum += ai[k] * b[k];
 				c[i] = sum;
 			}
 		});
