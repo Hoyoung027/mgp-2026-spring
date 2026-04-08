@@ -69,17 +69,26 @@ inline void gemv(float *a, float *b, float *c, int N) {
 			for (; i + 3 < i1; i += 4) {
 				const float *ai0=a+i*N, *ai1=a+(i+1)*N;
 				const float *ai2=a+(i+2)*N, *ai3=a+(i+3)*N;
-				__m128 vs0=_mm_setzero_ps(), vs1=_mm_setzero_ps();
-				__m128 vs2=_mm_setzero_ps(), vs3=_mm_setzero_ps();
+				// 행당 2개 누산기: _mm_add_ps 4-cycle 레이턴시를 2x ILP로 숨김
+				__m128 vs0a=_mm_setzero_ps(), vs0b=_mm_setzero_ps();
+				__m128 vs1a=_mm_setzero_ps(), vs1b=_mm_setzero_ps();
+				__m128 vs2a=_mm_setzero_ps(), vs2b=_mm_setzero_ps();
+				__m128 vs3a=_mm_setzero_ps(), vs3b=_mm_setzero_ps();
 				int k = 0;
-				for (; k <= N-4; k += 4) {
-					__m128 vb = _mm_loadu_ps(b+k);
-					vs0 = _mm_add_ps(vs0, _mm_mul_ps(_mm_loadu_ps(ai0+k), vb));
-					vs1 = _mm_add_ps(vs1, _mm_mul_ps(_mm_loadu_ps(ai1+k), vb));
-					vs2 = _mm_add_ps(vs2, _mm_mul_ps(_mm_loadu_ps(ai2+k), vb));
-					vs3 = _mm_add_ps(vs3, _mm_mul_ps(_mm_loadu_ps(ai3+k), vb));
+				for (; k <= N-8; k += 8) {
+					__m128 vb0 = _mm_loadu_ps(b+k);
+					__m128 vb1 = _mm_loadu_ps(b+k+4);
+					vs0a = _mm_add_ps(vs0a, _mm_mul_ps(_mm_loadu_ps(ai0+k),   vb0));
+					vs0b = _mm_add_ps(vs0b, _mm_mul_ps(_mm_loadu_ps(ai0+k+4), vb1));
+					vs1a = _mm_add_ps(vs1a, _mm_mul_ps(_mm_loadu_ps(ai1+k),   vb0));
+					vs1b = _mm_add_ps(vs1b, _mm_mul_ps(_mm_loadu_ps(ai1+k+4), vb1));
+					vs2a = _mm_add_ps(vs2a, _mm_mul_ps(_mm_loadu_ps(ai2+k),   vb0));
+					vs2b = _mm_add_ps(vs2b, _mm_mul_ps(_mm_loadu_ps(ai2+k+4), vb1));
+					vs3a = _mm_add_ps(vs3a, _mm_mul_ps(_mm_loadu_ps(ai3+k),   vb0));
+					vs3b = _mm_add_ps(vs3b, _mm_mul_ps(_mm_loadu_ps(ai3+k+4), vb1));
 				}
-				float s0=hsum(vs0), s1=hsum(vs1), s2=hsum(vs2), s3=hsum(vs3);
+				float s0=hsum(_mm_add_ps(vs0a,vs0b)), s1=hsum(_mm_add_ps(vs1a,vs1b));
+				float s2=hsum(_mm_add_ps(vs2a,vs2b)), s3=hsum(_mm_add_ps(vs3a,vs3b));
 				for (; k < N; k++) {
 					float bk=b[k];
 					s0+=ai0[k]*bk; s1+=ai1[k]*bk; s2+=ai2[k]*bk; s3+=ai3[k]*bk;
