@@ -160,7 +160,7 @@ inline void gemv(float *a, float *b, float *c, int N) {
 	};
 
 	// 첫 호출에 16 threads 생성, 이후 재사용 (spinwait으로 대기)
-	static GemvPool pool(12);
+	static GemvPool pool(16);
 	pool.run(a, b, c, N);
 
 	/****************/
