@@ -48,7 +48,7 @@ inline void gemv(float *a, float *b, float *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	const int num_threads = 4;
+	const int num_threads = 8;
 
 	std::vector<std::thread> threads;
 	threads.reserve(num_threads);
