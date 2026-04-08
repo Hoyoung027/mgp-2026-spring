@@ -143,41 +143,72 @@ inline void gemm(float *a, float *b, float *c, int N) {
 	if (num_threads < 1) num_threads = 1;
 	if (num_threads > 64) num_threads = 64;
 
-	std::vector<std::thread> threads;
-	threads.reserve(num_threads);
+	// ── Step 1: Transpose B → BT (병렬 + 타일링) ──────────────────────────
+	// BT[j][k] = B[k][j]: C[i][j] = dot(A[i], BT[j]) 로 둘 다 sequential 접근
+	float *bt = new float[(size_t)N * N];
+	{
+		std::vector<std::thread> tp;
+		tp.reserve(num_threads);
+		for (int tid = 0; tid < num_threads; ++tid) {
+			tp.emplace_back([=]() {
+				int rows_per = N / num_threads;
+				int j_start  = tid * rows_per;
+				int j_end    = (tid == num_threads - 1) ? N : j_start + rows_per;
+				// 타일링으로 B의 column 접근 cache miss 완화
+				for (int jj = j_start; jj < j_end; jj += TILE) {
+					int j_lim = std::min(jj + TILE, j_end);
+					for (int kk = 0; kk < N; kk += TILE) {
+						int k_lim = std::min(kk + TILE, N);
+						for (int j = jj; j < j_lim; ++j)
+							for (int k = kk; k < k_lim; ++k)
+								bt[j * N + k] = b[k * N + j];
+					}
+				}
+			});
+		}
+		for (auto &t : tp) t.join();
+	}
 
-	for (int tid = 0; tid < num_threads; ++tid) {
-		threads.emplace_back([=]() {
-			int rows_per = N / num_threads;
-			int i_start  = tid * rows_per;
-			int i_end    = (tid == num_threads - 1) ? N : i_start + rows_per;
+	// ── Step 2: Tiled GEMM with BT ──────────────────────────────────────────
+	// 루프 순서: ii → jj → kk → i → j → k
+	// 각 (i,j)에 대해 k가 0,1,...,N-1 순서로 누적 → float 결과 동일 보장
+	{
+		std::vector<std::thread> threads;
+		threads.reserve(num_threads);
+		for (int tid = 0; tid < num_threads; ++tid) {
+			threads.emplace_back([=]() {
+				int rows_per = N / num_threads;
+				int i_start  = tid * rows_per;
+				int i_end    = (tid == num_threads - 1) ? N : i_start + rows_per;
 
-			// zero assigned rows of c
-			for (int i = i_start; i < i_end; ++i)
-				for (int j = 0; j < N; ++j)
-					c[i * N + j] = 0.0f;
+				for (int i = i_start; i < i_end; ++i)
+					for (int j = 0; j < N; ++j)
+						c[i * N + j] = 0.0f;
 
-			// tiled ikj GEMM
-			for (int ii = i_start; ii < i_end; ii += TILE) {
-				int i_lim = std::min(ii + TILE, i_end);
-				for (int kk = 0; kk < N; kk += TILE) {
-					int k_lim = std::min(kk + TILE, N);
+				for (int ii = i_start; ii < i_end; ii += TILE) {
+					int i_lim = std::min(ii + TILE, i_end);
 					for (int jj = 0; jj < N; jj += TILE) {
 						int j_lim = std::min(jj + TILE, N);
-						for (int i = ii; i < i_lim; ++i) {
-							for (int k = kk; k < k_lim; ++k) {
-								float a_ik = a[i * N + k];
-								for (int j = jj; j < j_lim; ++j)
-									c[i * N + j] += a_ik * b[k * N + j];
+						for (int kk = 0; kk < N; kk += TILE) {
+							int k_lim = std::min(kk + TILE, N);
+							for (int i = ii; i < i_lim; ++i) {
+								const float *ai  = a  + i * N;
+								for (int j = jj; j < j_lim; ++j) {
+									const float *btj = bt + j * N;
+									// A[i][k]와 BT[j][k] 모두 sequential 접근
+									for (int k = kk; k < k_lim; ++k)
+										c[i * N + j] += ai[k] * btj[k];
+								}
 							}
 						}
 					}
 				}
-			}
-		});
+			});
+		}
+		for (auto &t : threads) t.join();
 	}
 
-	for (auto &t : threads) t.join();
+	delete[] bt;
 
 	/****************/
 }
