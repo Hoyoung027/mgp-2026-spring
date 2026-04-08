@@ -117,7 +117,7 @@ inline void gemv(float *a, float *b, float *c, int N) {
 					while (true) {
 						int v, spin = 0;
 						while ((v = work_ver.load(std::memory_order_acquire)) == seen) {
-							if (++spin < 2000) _mm_pause();
+							if (++spin < 8000) _mm_pause();
 							else std::this_thread::yield();
 						}
 						seen = v;
@@ -212,9 +212,20 @@ inline void gemm(float *a, float *b, float *c, int N) {
 						int j_lim = std::min(jj + TILE, N);
 						for (int i = ii; i < i_lim; ++i) {
 							for (int k = kk; k < k_lim; ++k) {
-								float a_ik = a[i * N + k];
-								for (int j = jj; j < j_lim; ++j)
-									c[i * N + j] += a_ik * b[k * N + j];
+								__m128 va = _mm_set1_ps(a[i * N + k]);
+								float *cp = c + i*N;
+								const float *bp = b + k*N;
+								int j = jj;
+								for (; j <= j_lim - 16; j += 16) {
+									_mm_storeu_ps(cp+j,    _mm_add_ps(_mm_loadu_ps(cp+j),    _mm_mul_ps(va, _mm_loadu_ps(bp+j))));
+									_mm_storeu_ps(cp+j+4,  _mm_add_ps(_mm_loadu_ps(cp+j+4),  _mm_mul_ps(va, _mm_loadu_ps(bp+j+4))));
+									_mm_storeu_ps(cp+j+8,  _mm_add_ps(_mm_loadu_ps(cp+j+8),  _mm_mul_ps(va, _mm_loadu_ps(bp+j+8))));
+									_mm_storeu_ps(cp+j+12, _mm_add_ps(_mm_loadu_ps(cp+j+12), _mm_mul_ps(va, _mm_loadu_ps(bp+j+12))));
+								}
+								for (; j <= j_lim - 4; j += 4)
+									_mm_storeu_ps(cp+j, _mm_add_ps(_mm_loadu_ps(cp+j), _mm_mul_ps(va, _mm_loadu_ps(bp+j))));
+								for (; j < j_lim; ++j)
+									cp[j] += a[i*N+k] * bp[j];
 							}
 						}
 					}
