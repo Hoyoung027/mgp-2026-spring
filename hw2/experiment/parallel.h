@@ -6,8 +6,6 @@
 // You cannot use OpenMP <omp.h>
 // Include header files if you need,
 // but it must work without modifying the Makefile
-#include <atomic>
-#include <functional>
 #include <thread>
 #include <vector>
 
@@ -46,87 +44,12 @@ inline void gemv(float *a, float *b, float *c, int N) {
 	/****************/
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
-
-	// Task descriptor: each worker thread handles rows [i0, i1)
-	struct Task {
-		float *a, *b, *c;
-		int i0, i1, N;
-	};
-
-	// Spin-wait thread pool (function-local static: created once, reused per call)
-	struct Pool {
-		int nt;
-		std::vector<Task> tasks;
-		std::vector<std::atomic<int>> state; // 0=idle, 1=run, -1=stop
-		std::vector<std::thread> workers;
-
-		static void run_task(const Task &t) {
-			for (int i = t.i0; i < t.i1; ++i) {
-				const float *ai = t.a + (size_t)i * t.N;
-				float sum = 0.0f;
-				for (int k = 0; k < t.N; ++k)
-					sum += ai[k] * t.b[k];
-				t.c[i] = sum;
-			}
-		}
-
-		Pool(int n) : nt(n), tasks(n), state(n) {
-			for (int i = 0; i < n; ++i)
-				state[i].store(0, std::memory_order_relaxed);
-			for (int tid = 0; tid < n; ++tid) {
-				workers.emplace_back([this, tid] {
-					while (true) {
-						int s;
-						while ((s = state[tid].load(
-								std::memory_order_acquire)) == 0)
-							#if defined(__x86_64__) || defined(__i386__)
-					__asm__ volatile("pause" ::: "memory");
-#else
-					std::this_thread::yield();
-#endif
-						if (s < 0)
-							return;
-						run_task(tasks[tid]);
-						state[tid].store(0, std::memory_order_release);
-					}
-				});
-			}
-		}
-
-		void dispatch() {
-			for (int i = 0; i < nt; ++i)
-				state[i].store(1, std::memory_order_release);
-			for (int i = 0; i < nt; ++i)
-				while (state[i].load(std::memory_order_acquire) != 0)
-					#if defined(__x86_64__) || defined(__i386__)
-					__asm__ volatile("pause" ::: "memory");
-#else
-					std::this_thread::yield();
-#endif
-		}
-
-		~Pool() {
-			for (int i = 0; i < nt; ++i)
-				state[i].store(-1, std::memory_order_release);
-			for (auto &w : workers)
-				w.join();
-		}
-	};
-
-	static int nt = std::min(64, std::max(1, (int)std::thread::hardware_concurrency()));
-	static Pool pool(nt);
-
-	int rows_per = N / nt;
-	for (int tid = 0; tid < nt; ++tid) {
-		pool.tasks[tid] = {
-			a, b, c,
-			tid * rows_per,
-			(tid == nt - 1) ? N : (tid + 1) * rows_per,
-			N
-		};
+	for (int i = 0; i < N; ++i) {
+		float sum = 0.0f;
+		for (int k = 0; k < N; ++k)
+			sum += a[i * N + k] * b[k];
+		c[i] = sum;
 	}
-	pool.dispatch();
-
 	/****************/
 }
 
