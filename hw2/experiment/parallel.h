@@ -23,7 +23,7 @@ inline void init_vec(float *a, int N) {
 	/* You don't have to parallelize all of your code - it's up to you. */
 	srand(42);
 	for (int i = 0; i < N; ++i)
-		a[i] = (float)rand() / (float)RAND_MAX;
+		a[i] = (float)(rand()%2);
 	/****************/
 }
 
