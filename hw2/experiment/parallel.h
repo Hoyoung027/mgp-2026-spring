@@ -63,22 +63,8 @@ inline void gemv(float *a, float *b, float *c, int N) {
 		static void run_task(const Task &t) {
 			for (int i = t.i0; i < t.i1; ++i) {
 				const float *ai = t.a + (size_t)i * t.N;
-				// 8-way scalar unrolling for ILP without compiler -O2
-				float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
-				float s4 = 0, s5 = 0, s6 = 0, s7 = 0;
-				int k = 0;
-				for (; k + 7 < t.N; k += 8) {
-					s0 += ai[k]     * t.b[k];
-					s1 += ai[k + 1] * t.b[k + 1];
-					s2 += ai[k + 2] * t.b[k + 2];
-					s3 += ai[k + 3] * t.b[k + 3];
-					s4 += ai[k + 4] * t.b[k + 4];
-					s5 += ai[k + 5] * t.b[k + 5];
-					s6 += ai[k + 6] * t.b[k + 6];
-					s7 += ai[k + 7] * t.b[k + 7];
-				}
-				float sum = (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7);
-				for (; k < t.N; ++k)
+				float sum = 0.0f;
+				for (int k = 0; k < t.N; ++k)
 					sum += ai[k] * t.b[k];
 				t.c[i] = sum;
 			}
