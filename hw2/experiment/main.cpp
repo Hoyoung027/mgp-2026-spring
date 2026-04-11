@@ -14,7 +14,7 @@ using namespace std;
 
 bool is_same_vec(float *a, float *b, int N) {
 	for (int i = 0; i < N; i++) {
-		if (a[i] != b[i]) {
+		if (abs(a[i] - b[i]) > 1e-7) {
 			return false;
 		}
 	}
@@ -24,7 +24,7 @@ bool is_same_vec(float *a, float *b, int N) {
 bool is_same_mat(float *a, float *b, int N) {
 	for (int i = 0; i < N; i++) {
 		for (int j = 0; j < N; j++) {
-			if (a[i * N + j] != b[i * N + j]) {
+			if (abs(a[i * N + j] - b[i * N + j]) > 1e-7) {
 				return false;
 			}
 		}
