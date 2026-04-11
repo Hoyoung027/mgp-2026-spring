@@ -127,7 +127,7 @@ inline void gemv(float *a, float *b, float *c, int N) {
 		}
 	};
 
-	static int nt = std::max(1, (int)std::thread::hardware_concurrency());
+	static int nt = std::min(64, std::max(1, (int)std::thread::hardware_concurrency()));
 	static Pool pool(nt);
 
 	int rows_per = N / nt;
@@ -163,7 +163,7 @@ inline void gemm(float *a, float *b, float *c, int N) {
 
 	// TILE=64: 3 tiles (A+B+C) × 16KB = 48KB → fits in typical 256KB L2 cache
 	const int TILE = 64;
-	int nt = std::max(1, (int)std::thread::hardware_concurrency());
+	int nt = std::min(64, std::max(1, (int)std::thread::hardware_concurrency()));
 	int rows_per = N / nt;
 
 	std::vector<std::thread> threads;
