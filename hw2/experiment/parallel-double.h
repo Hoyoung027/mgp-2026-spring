@@ -3,8 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <numeric>
-#include <mutex>
-#include <condition_variable>
+#include <emmintrin.h>  // SSE2
 #include <thread> // added
 #include <vector> // added
 // You cannot use OpenMP <omp.h>
@@ -49,103 +48,38 @@ inline void gemv(double *a, double *b, double *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	struct GemvPool {
-		int T = 0;
-		double *a = nullptr, *b = nullptr, *c = nullptr;
-		int N = 0;
-		std::mutex mtx;
-		std::condition_variable cv_work, cv_done;
-		int task_id    = 0;
-		int done_count = 0;
-		bool shutdown  = false;
-		std::vector<std::thread> threads;
-	};
-	static GemvPool pool;
-	static std::once_flag init_flag;
-
-	std::call_once(init_flag, []() {
-		pool.T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
-		for (int t = 1; t < pool.T; t++) {
-			pool.threads.emplace_back([t]() {
-				int my_last = 0;
-				while (true) {
-					double *wa, *wb, *wc; int wN, wT;
-					{
-						std::unique_lock<std::mutex> lk(pool.mtx);
-						pool.cv_work.wait(lk, [&my_last]{
-							return pool.task_id > my_last || pool.shutdown;
-						});
-						if (pool.shutdown) break;
-						my_last = pool.task_id;
-						wa = pool.a; wb = pool.b; wc = pool.c;
-						wN = pool.N; wT = pool.T;
+	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
+	std::vector<std::thread> threads;
+	threads.reserve(T);
+	int chunk = N / T;
+	for (int t = 0; t < T; t++) {
+		int start = t * chunk;
+		int end   = (t == T - 1) ? N : start + chunk;
+			threads.emplace_back([=]() {
+				for (int i = start; i < end; i++) {
+					double *row = a + i * N;
+					__m128d acc0 = _mm_setzero_pd();
+					__m128d acc1 = _mm_setzero_pd();
+					__m128d acc2 = _mm_setzero_pd();
+					__m128d acc3 = _mm_setzero_pd();
+					int j = 0;
+					for (; j <= N - 8; j += 8) {
+						acc0 = _mm_add_pd(acc0, _mm_mul_pd(_mm_loadu_pd(&row[j]),     _mm_loadu_pd(&b[j])));
+						acc1 = _mm_add_pd(acc1, _mm_mul_pd(_mm_loadu_pd(&row[j + 2]), _mm_loadu_pd(&b[j + 2])));
+						acc2 = _mm_add_pd(acc2, _mm_mul_pd(_mm_loadu_pd(&row[j + 4]), _mm_loadu_pd(&b[j + 4])));
+						acc3 = _mm_add_pd(acc3, _mm_mul_pd(_mm_loadu_pd(&row[j + 6]), _mm_loadu_pd(&b[j + 6])));
 					}
-					int chunk = wN / wT;
-					int start = t * chunk;
-					int end   = (t == wT - 1) ? wN : start + chunk;
-					for (int i = start; i < end; i++) {
-						double *row = wa + i * wN;
-						double s0=0, s1=0, s2=0, s3=0, s4=0, s5=0, s6=0, s7=0;
-						int j = 0;
-						for (; j <= wN - 8; j += 8) {
-							s0 += row[j]     * wb[j];
-							s1 += row[j + 1] * wb[j + 1];
-							s2 += row[j + 2] * wb[j + 2];
-							s3 += row[j + 3] * wb[j + 3];
-							s4 += row[j + 4] * wb[j + 4];
-							s5 += row[j + 5] * wb[j + 5];
-							s6 += row[j + 6] * wb[j + 6];
-							s7 += row[j + 7] * wb[j + 7];
-						}
-						for (; j < wN; j++) s0 += row[j] * wb[j];
-						wc[i] = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7;
-					}
-					{
-						std::lock_guard<std::mutex> lk(pool.mtx);
-						if (++pool.done_count == pool.T - 1)
-							pool.cv_done.notify_one();
-					}
+					acc0 = _mm_add_pd(acc0, acc1);
+					acc2 = _mm_add_pd(acc2, acc3);
+					acc0 = _mm_add_pd(acc0, acc2);
+					acc0 = _mm_add_pd(acc0, _mm_shuffle_pd(acc0, acc0, 1));
+					double sum = _mm_cvtsd_f64(acc0);
+					for (; j < N; j++) sum += row[j] * b[j];
+					c[i] = sum;
 				}
 			});
-		}
-	});
-
-	// 작업 설정 후 워커 깨우기
-	{
-		std::lock_guard<std::mutex> lk(pool.mtx);
-		pool.a = a; pool.b = b; pool.c = c; pool.N = N;
-		pool.done_count = 0;
-		pool.task_id++;
-		pool.cv_work.notify_all();
 	}
-
-	// main thread가 tid=0 구간 직접 계산
-	{
-		int chunk = N / pool.T;
-		for (int i = 0; i < chunk; i++) {
-			double *row = a + i * N;
-			double s0=0, s1=0, s2=0, s3=0, s4=0, s5=0, s6=0, s7=0;
-			int j = 0;
-			for (; j <= N - 8; j += 8) {
-				s0 += row[j]     * b[j];
-				s1 += row[j + 1] * b[j + 1];
-				s2 += row[j + 2] * b[j + 2];
-				s3 += row[j + 3] * b[j + 3];
-				s4 += row[j + 4] * b[j + 4];
-				s5 += row[j + 5] * b[j + 5];
-				s6 += row[j + 6] * b[j + 6];
-				s7 += row[j + 7] * b[j + 7];
-			}
-			for (; j < N; j++) s0 += row[j] * b[j];
-			c[i] = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7;
-		}
-	}
-
-	// 워커 완료 대기
-	{
-		std::unique_lock<std::mutex> lk(pool.mtx);
-		pool.cv_done.wait(lk, []{ return pool.done_count == pool.T - 1; });
-	}
+	for (auto &th : threads) th.join();
 
 	/****************/
 }
@@ -167,7 +101,7 @@ inline void gemm(double *a, double *b, double *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
+		const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
 	std::vector<std::thread> threads;
 	threads.reserve(T);
 	int chunk = N / T;
