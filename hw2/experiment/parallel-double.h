@@ -3,7 +3,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <numeric>
-#include <emmintrin.h>  // SSE2
 #include <thread> // added
 #include <vector> // added
 // You cannot use OpenMP <omp.h>
@@ -56,26 +55,34 @@ inline void gemv(double *a, double *b, double *c, int N) {
 		int start = t * chunk;
 		int end   = (t == T - 1) ? N : start + chunk;
 			threads.emplace_back([=]() {
-				for (int i = start; i < end; i++) {
-					double *row = a + i * N;
-					__m128d acc0 = _mm_setzero_pd();
-					__m128d acc1 = _mm_setzero_pd();
-					__m128d acc2 = _mm_setzero_pd();
-					__m128d acc3 = _mm_setzero_pd();
-					int j = 0;
-					for (; j <= N - 8; j += 8) {
-						acc0 = _mm_add_pd(acc0, _mm_mul_pd(_mm_loadu_pd(&row[j]),     _mm_loadu_pd(&b[j])));
-						acc1 = _mm_add_pd(acc1, _mm_mul_pd(_mm_loadu_pd(&row[j + 2]), _mm_loadu_pd(&b[j + 2])));
-						acc2 = _mm_add_pd(acc2, _mm_mul_pd(_mm_loadu_pd(&row[j + 4]), _mm_loadu_pd(&b[j + 4])));
-						acc3 = _mm_add_pd(acc3, _mm_mul_pd(_mm_loadu_pd(&row[j + 6]), _mm_loadu_pd(&b[j + 6])));
+				int i = start;
+				// 2행 동시 계산: b[j] 로드 1회로 두 행에 재사용
+				for (; i <= end - 2; i += 2) {
+					double *row0 = a + i * N;
+					double *row1 = a + (i + 1) * N;
+					double s0=0, s1=0, s2=0, s3=0;
+					double t0=0, t1=0, t2=0, t3=0;
+					for (int j = 0; j <= N - 4; j += 4) {
+						double bj0=b[j], bj1=b[j+1], bj2=b[j+2], bj3=b[j+3];
+						s0 += row0[j]   * bj0;  t0 += row1[j]   * bj0;
+						s1 += row0[j+1] * bj1;  t1 += row1[j+1] * bj1;
+						s2 += row0[j+2] * bj2;  t2 += row1[j+2] * bj2;
+						s3 += row0[j+3] * bj3;  t3 += row1[j+3] * bj3;
 					}
-					acc0 = _mm_add_pd(acc0, acc1);
-					acc2 = _mm_add_pd(acc2, acc3);
-					acc0 = _mm_add_pd(acc0, acc2);
-					acc0 = _mm_add_pd(acc0, _mm_shuffle_pd(acc0, acc0, 1));
-					double sum = _mm_cvtsd_f64(acc0);
-					for (; j < N; j++) sum += row[j] * b[j];
-					c[i] = sum;
+					c[i]     = s0 + s1 + s2 + s3;
+					c[i + 1] = t0 + t1 + t2 + t3;
+				}
+				// remainder: 홀수 행 처리 (N/T가 홀수일 경우)
+				for (; i < end; i++) {
+					double *row = a + i * N;
+					double s0=0, s1=0, s2=0, s3=0;
+					for (int j = 0; j <= N - 4; j += 4) {
+						s0 += row[j]   * b[j];
+						s1 += row[j+1] * b[j+1];
+						s2 += row[j+2] * b[j+2];
+						s3 += row[j+3] * b[j+3];
+					}
+					c[i] = s0 + s1 + s2 + s3;
 				}
 			});
 	}
