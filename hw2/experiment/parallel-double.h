@@ -54,20 +54,26 @@ inline void gemv(double *a, double *b, double *c, int N) {
 	for (int t = 0; t < T; t++) {
 		int start = t * chunk;
 		int end   = (t == T - 1) ? N : start + chunk;
-		threads.emplace_back([=]() {
-			for (int i = start; i < end; i++) {
-				double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
-				int j = 0;
-				for (; j <= N - 4; j += 4) {
-					s0 += a[i * N + j]     * b[j];
-					s1 += a[i * N + j + 1] * b[j + 1];
-					s2 += a[i * N + j + 2] * b[j + 2];
-					s3 += a[i * N + j + 3] * b[j + 3];
+			threads.emplace_back([=]() {
+				for (int i = start; i < end; i++) {
+					double *row = a + i * N;
+					double s0 = 0, s1 = 0, s2 = 0, s3 = 0,
+					       s4 = 0, s5 = 0, s6 = 0, s7 = 0;
+					int j = 0;
+					for (; j <= N - 8; j += 8) {
+						s0 += row[j]     * b[j];
+						s1 += row[j + 1] * b[j + 1];
+						s2 += row[j + 2] * b[j + 2];
+						s3 += row[j + 3] * b[j + 3];
+						s4 += row[j + 4] * b[j + 4];
+						s5 += row[j + 5] * b[j + 5];
+						s6 += row[j + 6] * b[j + 6];
+						s7 += row[j + 7] * b[j + 7];
+					}
+					for (; j < N; j++) s0 += row[j] * b[j];
+					c[i] = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7;
 				}
-				for (; j < N; j++) s0 += a[i * N + j] * b[j];
-				c[i] = s0 + s1 + s2 + s3;
-			}
-		});
+			});
 	}
 	for (auto &th : threads) th.join();
 
