@@ -47,7 +47,7 @@ inline void gemv(double *a, double *b, double *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
+	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 16));
 	std::vector<std::thread> threads;
 	threads.reserve(T);
 	int chunk = N / T;
@@ -84,7 +84,7 @@ inline void gemm(double *a, double *b, double *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
+	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 16));
 	std::vector<std::thread> threads;
 	threads.reserve(T);
 	int chunk = N / T;
