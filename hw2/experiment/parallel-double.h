@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <numeric>
+#include <thread>
+#include <vector>
 // You cannot use OpenMP <omp.h>
 // Include header files if you need,
 // but it must work without modifying the Makefile
@@ -45,12 +47,22 @@ inline void gemv(double *a, double *b, double *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	for (int i = 0; i < N; ++i) {
-		double sum = 0.0;
-		for (int j = 0; j < N; ++j)
-			sum += a[i * N + j] * b[j];
-		c[i] = sum;
+	const int T = std::thread::hardware_concurrency();
+	std::vector<std::thread> threads;
+	threads.reserve(T);
+	int chunk = N / T;
+	for (int t = 0; t < T; t++) {
+		int start = t * chunk;
+		int end   = (t == T - 1) ? N : start + chunk;
+		threads.emplace_back([=]() {
+			for (int i = start; i < end; i++) {
+				double sum = 0.0;
+				for (int j = 0; j < N; j++) sum += a[i * N + j] * b[j];
+				c[i] = sum;
+			}
+		});
 	}
+	for (auto &th : threads) th.join();
 
 	/****************/
 }
@@ -72,16 +84,24 @@ inline void gemm(double *a, double *b, double *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	for (int i = 0; i < N; ++i)
-		for (int j = 0; j < N; ++j)
-			c[i * N + j] = 0.0;
-
-	for (int i = 0; i < N; ++i)
-		for (int k = 0; k < N; ++k) {
-			double aik = a[i * N + k];
-			for (int j = 0; j < N; ++j)
-				c[i * N + j] += aik * b[k * N + j];
-		}
+	const int T = std::thread::hardware_concurrency();
+	std::vector<std::thread> threads;
+	threads.reserve(T);
+	int chunk = N / T;
+	for (int t = 0; t < T; t++) {
+		int start = t * chunk;
+		int end   = (t == T - 1) ? N : start + chunk;
+		threads.emplace_back([=]() {
+			for (int i = start; i < end; i++)
+				for (int j = 0; j < N; j++) c[i * N + j] = 0.0;
+			for (int i = start; i < end; i++)
+				for (int k = 0; k < N; k++) {
+					double aik = a[i * N + k];
+					for (int j = 0; j < N; j++) c[i * N + j] += aik * b[k * N + j];
+				}
+		});
+	}
+	for (auto &th : threads) th.join();
 
 	/****************/
 }
