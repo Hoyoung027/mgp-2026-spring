@@ -3,8 +3,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <numeric>
-#include <thread>
-#include <vector>
+#include <thread> // added
+#include <vector> // added
 // You cannot use OpenMP <omp.h>
 // Include header files if you need,
 // but it must work without modifying the Makefile
@@ -24,7 +24,7 @@ inline void init_vec(double *a, int N) {
 
 	srand(42);
 	for (int i = 0; i < N; ++i)
-		a[i] = (double)(rand() & 1);
+        a[i] = static_cast<double>(rand()) / static_cast<double>(RAND_MAX);
 
 	/****************/
 }

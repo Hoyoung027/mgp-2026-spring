@@ -24,8 +24,8 @@ inline void init_vec(double *a, int N) {
 
 	srand(42);
 	for (int i = 0; i < N; ++i)
-		a[i] = (double)(rand() & 1);
-	
+        a[i] = static_cast<double>(rand()) / static_cast<double>(RAND_MAX);
+
 	/****************/
 }
 
