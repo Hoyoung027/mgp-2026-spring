@@ -56,9 +56,16 @@ inline void gemv(double *a, double *b, double *c, int N) {
 		int end   = (t == T - 1) ? N : start + chunk;
 		threads.emplace_back([=]() {
 			for (int i = start; i < end; i++) {
-				double sum = 0.0;
-				for (int j = 0; j < N; j++) sum += a[i * N + j] * b[j];
-				c[i] = sum;
+				double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+				int j = 0;
+				for (; j <= N - 4; j += 4) {
+					s0 += a[i * N + j]     * b[j];
+					s1 += a[i * N + j + 1] * b[j + 1];
+					s2 += a[i * N + j + 2] * b[j + 2];
+					s3 += a[i * N + j + 3] * b[j + 3];
+				}
+				for (; j < N; j++) s0 += a[i * N + j] * b[j];
+				c[i] = s0 + s1 + s2 + s3;
 			}
 		});
 	}
@@ -97,7 +104,14 @@ inline void gemm(double *a, double *b, double *c, int N) {
 			for (int i = start; i < end; i++)
 				for (int k = 0; k < N; k++) {
 					double aik = a[i * N + k];
-					for (int j = 0; j < N; j++) c[i * N + j] += aik * b[k * N + j];
+					int j = 0;
+					for (; j <= N - 4; j += 4) {
+						c[i * N + j]     += aik * b[k * N + j];
+						c[i * N + j + 1] += aik * b[k * N + j + 1];
+						c[i * N + j + 2] += aik * b[k * N + j + 2];
+						c[i * N + j + 3] += aik * b[k * N + j + 3];
+					}
+					for (; j < N; j++) c[i * N + j] += aik * b[k * N + j];
 				}
 		});
 	}
