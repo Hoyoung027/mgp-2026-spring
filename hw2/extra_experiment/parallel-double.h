@@ -28,7 +28,7 @@ inline void init_vec(double* a, int N) {
 //   2. 2행 동시: b[j] 1회 로드로 2행에 재사용 → b[] 메모리 접근 절반
 //   3. 4× unroll: 16 doubles/iteration, ILP 최대화
 inline void gemv(double* a, double* b, double* c, int N) {
-    const int T     = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
+    const int T     = std::max(1, std::min((int)std::thread::hardware_concurrency(), 8));
     const int chunk = N / T;
     std::vector<std::thread> threads;
     threads.reserve(T);
