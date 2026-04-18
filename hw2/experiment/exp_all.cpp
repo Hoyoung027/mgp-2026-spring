@@ -7,11 +7,20 @@
 #include <iostream>
 #include <vector>
 
+static std::ofstream open_csv(const std::string &path, const std::string &header) {
+    std::ifstream check(path);
+    bool exists = check.good();
+    check.close();
+    std::ofstream f(path, std::ios::app);
+    if (!exists) f << header << "\n";
+    return f;
+}
+
 using Clock = std::chrono::steady_clock;
 using Sec   = std::chrono::duration<double>;
 
 static const int N    = 1 << 11;
-static const int RUNS = 5;
+static const int RUNS = 3;
 
 static double *mat_a, *mat_b, *mat_c, *vec_b, *tmp1, *tmp2, *tmp3;
 
@@ -25,8 +34,7 @@ void exp_thread_scaling() {
     const int n_tc_gemm = sizeof(thread_counts_gemm) / sizeof(thread_counts_gemm[0]);
     std::cout << "\n=== [Experiment 1] Thread Scaling ===\n";
 
-    std::ofstream csv("data/results_thread_scaling.csv");
-    csv << "func,threads,avg_sec\n";
+    auto csv = open_csv("data/results_thread_scaling.csv", "func,threads,avg_sec");
 
     std::cout << "\n-- gemv_sse --\n";
     for (int ti = 0; ti < n_tc_gemv; ti++) {
@@ -57,7 +65,7 @@ void exp_thread_scaling() {
             delete[] out;
         }
         double avg = total / RUNS;
-        std::cout << std::fixed << std::setprecision(3)
+        std::cout << std::fixed << std::setprecision(6)
                   << "T=" << std::setw(2) << T << "  avg: " << avg << " sec\n";
         csv << "gemm_sse," << T << "," << avg << "\n";
     }
@@ -113,11 +121,10 @@ void exp_gemm_vs_freivalds() {
               << "GEMM       ops: " << std::scientific << std::setprecision(2) << (double)ops_gemm
               << "  avg: " << std::fixed << std::setprecision(3) << avg_gemm << " sec\n"
               << "Freivalds  ops: " << std::scientific << std::setprecision(2) << (double)ops_freivalds
-              << "  avg: " << std::fixed << std::setprecision(3) << avg_frv * 1e3 << " ms"
+              << "  avg: " << std::fixed << std::setprecision(6) << avg_frv << " sec"
               << "  speedup: " << std::setprecision(1) << (avg_gemm / avg_frv) << "x\n";
 
-    std::ofstream csv("data/results_gemm_vs_freivalds.csv");
-    csv << "method,ops,avg_sec\n";
+    auto csv = open_csv("data/results_gemm_vs_freivalds.csv", "method,ops,avg_sec");
     csv << "gemm," << ops_gemm << "," << avg_gemm << "\n";
     csv << "freivalds," << ops_freivalds << "," << avg_frv << "\n";
     std::cout << "  -> saved: data/results_gemm_vs_freivalds.csv\n";
@@ -132,8 +139,7 @@ void exp_versions() {
 
     std::cout << "\n=== [Experiment 3] Version Comparison ===\n";
 
-    std::ofstream csv("data/results_versions.csv");
-    csv << "func,version,avg_sec\n";
+    auto csv = open_csv("data/results_versions.csv", "func,version,avg_sec");
 
     double t_naive, t_unrolled, t_sse;
 
@@ -189,24 +195,28 @@ void exp_versions() {
     {
         double total = 0.0;
         for (int r = 0; r < RUNS; r++) {
+            double *out = new double[N * N];
             auto s = Clock::now();
-            gemm_naive(mat_a, mat_b, tmp2, N, T_gemm);
+            gemm_naive(mat_a, mat_b, out, N, T_gemm);
             total += Sec(Clock::now() - s).count();
+            delete[] out;
         }
         t_naive = total / RUNS;
-        std::cout << std::fixed << std::setprecision(3)
+        std::cout << std::fixed << std::setprecision(6)
                   << "naive     avg: " << t_naive << " sec\n";
         csv << "gemm,naive," << t_naive << "\n";
     }
     {
         double total = 0.0;
         for (int r = 0; r < RUNS; r++) {
+            double *out = new double[N * N];
             auto s = Clock::now();
-            gemm_unrolled(mat_a, mat_b, tmp2, N, T_gemm);
+            gemm_unrolled(mat_a, mat_b, out, N, T_gemm);
             total += Sec(Clock::now() - s).count();
+            delete[] out;
         }
         t_unrolled = total / RUNS;
-        std::cout << std::fixed << std::setprecision(3)
+        std::cout << std::fixed << std::setprecision(6)
                   << "unrolled  avg: " << t_unrolled << " sec"
                   << "  speedup vs naive: " << std::setprecision(2) << (t_naive / t_unrolled) << "x\n";
         csv << "gemm,unrolled," << t_unrolled << "\n";
@@ -214,12 +224,14 @@ void exp_versions() {
     {
         double total = 0.0;
         for (int r = 0; r < RUNS; r++) {
+            double *out = new double[N * N];
             auto s = Clock::now();
-            gemm_sse(mat_a, mat_b, tmp2, N, T_gemm);
+            gemm_sse(mat_a, mat_b, out, N, T_gemm);
             total += Sec(Clock::now() - s).count();
+            delete[] out;
         }
         t_sse = total / RUNS;
-        std::cout << std::fixed << std::setprecision(3)
+        std::cout << std::fixed << std::setprecision(6)
                   << "sse       avg: " << t_sse << " sec"
                   << "  speedup vs naive: " << std::setprecision(2) << (t_naive / t_sse) << "x\n";
         csv << "gemm,sse," << t_sse << "\n";
