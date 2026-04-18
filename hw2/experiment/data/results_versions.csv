@@ -1,4 +1,0 @@
-func,version,avg_sec
-gemv,naive,0.00302253
-gemv,unrolled,0.00207197
-gemv,sse,0.00152765
