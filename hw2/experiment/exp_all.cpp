@@ -11,7 +11,7 @@ using Clock = std::chrono::steady_clock;
 using Sec   = std::chrono::duration<double>;
 
 static const int N    = 1 << 11;
-static const int RUNS = 10;
+static const int RUNS = 5;
 
 static double *mat_a, *mat_b, *mat_c, *vec_b, *tmp1, *tmp2, *tmp3;
 
@@ -19,7 +19,7 @@ static double *mat_a, *mat_b, *mat_c, *vec_b, *tmp1, *tmp2, *tmp3;
 // 실험 1: 스레드 수별 확장성 (gemv_sse, gemm_sse)
 // ============================================================
 void exp_thread_scaling() {
-    const int thread_counts[] = {1, 2, 4, 8, 16, 32};
+    const int thread_counts[] = {1, 2, 4, 8, 16, 32, 64};
     const int n_tc = sizeof(thread_counts) / sizeof(thread_counts[0]);
 
     std::cout << "\n=== [Experiment 1] Thread Scaling ===\n";
@@ -206,7 +206,7 @@ void exp_versions() {
 // ============================================================
 // main
 // ============================================================
-int main() {
+int main(int argc, char **argv) {
     mat_a = new double[N * N];
     mat_b = new double[N * N];
     mat_c = new double[N * N];
@@ -229,9 +229,16 @@ int main() {
         f_v >> vec_b[i];
     }
 
-    exp_thread_scaling();
-    exp_gemm_vs_freivalds();
-    exp_versions();
+    int exp = (argc > 1) ? std::atoi(argv[1]) : 0;
+    switch (exp) {
+        case 1: exp_thread_scaling();     break;
+        case 2: exp_gemm_vs_freivalds();  break;
+        case 3: exp_versions();           break;
+        default:
+            exp_thread_scaling();
+            exp_gemm_vs_freivalds();
+            exp_versions();
+    }
 
     delete[] mat_a; delete[] mat_b; delete[] mat_c;
     delete[] vec_b; delete[] tmp1;  delete[] tmp2; delete[] tmp3;

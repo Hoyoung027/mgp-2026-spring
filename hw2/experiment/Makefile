@@ -13,6 +13,18 @@ run_exp:
 	mkdir -p data
 	./build/exp_all
 
+run_exp1:
+	mkdir -p data
+	./build/exp_all 1
+
+run_exp2:
+	mkdir -p data
+	./build/exp_all 2
+
+run_exp3:
+	mkdir -p data
+	./build/exp_all 3
+
 clean:
 	rm -rf build
 
