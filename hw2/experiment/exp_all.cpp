@@ -184,28 +184,13 @@ void exp_versions(const std::string &func) {
             for (int r = 0; r < RUNS; r++) {
                 double *out = new double[N * N];
                 auto s = Clock::now();
-                gemm_naive(mat_a, mat_b, out, N, T_gemm);
-                total += Sec(Clock::now() - s).count();
-                delete[] out;
-            }
-            t_naive = total / RUNS;
-            std::cout << std::fixed << std::setprecision(6)
-                      << "naive     avg: " << t_naive << " sec\n";
-            csv << "gemm,naive," << t_naive << "\n";
-        }
-        {
-            double total = 0.0;
-            for (int r = 0; r < RUNS; r++) {
-                double *out = new double[N * N];
-                auto s = Clock::now();
                 gemm_unrolled(mat_a, mat_b, out, N, T_gemm);
                 total += Sec(Clock::now() - s).count();
                 delete[] out;
             }
             t_unrolled = total / RUNS;
             std::cout << std::fixed << std::setprecision(6)
-                      << "unrolled  avg: " << t_unrolled << " sec"
-                      << "  speedup vs naive: " << std::setprecision(2) << (t_naive / t_unrolled) << "x\n";
+                      << "unrolled  avg: " << t_unrolled << " sec\n";
             csv << "gemm,unrolled," << t_unrolled << "\n";
         }
         {
@@ -220,7 +205,7 @@ void exp_versions(const std::string &func) {
             t_sse = total / RUNS;
             std::cout << std::fixed << std::setprecision(6)
                       << "sse       avg: " << t_sse << " sec"
-                      << "  speedup vs naive: " << std::setprecision(2) << (t_naive / t_sse) << "x\n";
+                      << "  speedup vs unrolled: " << std::setprecision(2) << (t_unrolled / t_sse) << "x\n";
             csv << "gemm,sse," << t_sse << "\n";
         }
     }
