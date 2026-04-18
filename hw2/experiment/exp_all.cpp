@@ -21,7 +21,7 @@ using Clock = std::chrono::steady_clock;
 using Sec   = std::chrono::duration<double>;
 
 static const int N    = 1 << 11;
-static const int RUNS = 3;
+static const int RUNS = 1;
 
 static double *mat_a, *mat_b, *mat_c, *vec_b;
 
