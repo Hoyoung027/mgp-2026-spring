@@ -5,6 +5,7 @@
 #include <numeric>
 #include <thread> // added
 #include <vector> // added
+#include <immintrin.h> // added
 // You cannot use OpenMP <omp.h>
 // Include header files if you need,
 // but it must work without modifying the Makefile
@@ -47,33 +48,67 @@ inline void gemv(double *a, double *b, double *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
+	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 8));
 	std::vector<std::thread> threads;
 	threads.reserve(T);
 	int chunk = N / T;
 	for (int t = 0; t < T; t++) {
 		int start = t * chunk;
 		int end   = (t == T - 1) ? N : start + chunk;
-			threads.emplace_back([=]() {
-				for (int i = start; i < end; i++) {
-					double *row = a + i * N;
-					double s0 = 0, s1 = 0, s2 = 0, s3 = 0,
-					       s4 = 0, s5 = 0, s6 = 0, s7 = 0;
-					int j = 0;
-					for (; j <= N - 8; j += 8) {
-						s0 += row[j]     * b[j];
-						s1 += row[j + 1] * b[j + 1];
-						s2 += row[j + 2] * b[j + 2];
-						s3 += row[j + 3] * b[j + 3];
-						s4 += row[j + 4] * b[j + 4];
-						s5 += row[j + 5] * b[j + 5];
-						s6 += row[j + 6] * b[j + 6];
-						s7 += row[j + 7] * b[j + 7];
-					}
-					for (; j < N; j++) s0 += row[j] * b[j];
-					c[i] = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7;
+		threads.emplace_back([=]() {
+			const double *b_end8 = b + N - 7;
+			const double *b_end  = b + N;
+			double *row0 = a + start * N;
+			double *row1 = row0 + N;
+			int i = start;
+			for (; i <= end - 2; i += 2, row0 += 2*N, row1 += 2*N) {
+				__m128d s0=_mm_setzero_pd(), s1=_mm_setzero_pd();
+				__m128d s2=_mm_setzero_pd(), s3=_mm_setzero_pd();
+				__m128d t0=_mm_setzero_pd(), t1=_mm_setzero_pd();
+				__m128d t2=_mm_setzero_pd(), t3=_mm_setzero_pd();
+				const double *pb  = b;
+				const double *pr0 = row0;
+				const double *pr1 = row1;
+				for (; pb < b_end8; pb+=8, pr0+=8, pr1+=8) {
+					__m128d bv0=_mm_loadu_pd(pb+0), bv1=_mm_loadu_pd(pb+2);
+					__m128d bv2=_mm_loadu_pd(pb+4), bv3=_mm_loadu_pd(pb+6);
+					s0=_mm_add_pd(s0, _mm_mul_pd(_mm_loadu_pd(pr0+0), bv0));
+					s1=_mm_add_pd(s1, _mm_mul_pd(_mm_loadu_pd(pr0+2), bv1));
+					s2=_mm_add_pd(s2, _mm_mul_pd(_mm_loadu_pd(pr0+4), bv2));
+					s3=_mm_add_pd(s3, _mm_mul_pd(_mm_loadu_pd(pr0+6), bv3));
+					t0=_mm_add_pd(t0, _mm_mul_pd(_mm_loadu_pd(pr1+0), bv0));
+					t1=_mm_add_pd(t1, _mm_mul_pd(_mm_loadu_pd(pr1+2), bv1));
+					t2=_mm_add_pd(t2, _mm_mul_pd(_mm_loadu_pd(pr1+4), bv2));
+					t3=_mm_add_pd(t3, _mm_mul_pd(_mm_loadu_pd(pr1+6), bv3));
 				}
-			});
+				__m128d rs = _mm_add_pd(_mm_add_pd(s0, s1), _mm_add_pd(s2, s3));
+				__m128d rt = _mm_add_pd(_mm_add_pd(t0, t1), _mm_add_pd(t2, t3));
+				double acc0 = _mm_cvtsd_f64(_mm_add_sd(rs, _mm_unpackhi_pd(rs, rs)));
+				double acc1 = _mm_cvtsd_f64(_mm_add_sd(rt, _mm_unpackhi_pd(rt, rt)));
+				for (; pb < b_end; pb++, pr0++, pr1++) {
+					acc0 += *pr0 * *pb;
+					acc1 += *pr1 * *pb;
+				}
+				c[i]     = acc0;
+				c[i + 1] = acc1;
+			}
+			for (; i < end; i++, row0 += N) {
+				__m128d s0=_mm_setzero_pd(), s1=_mm_setzero_pd();
+				__m128d s2=_mm_setzero_pd(), s3=_mm_setzero_pd();
+				const double *pb  = b;
+				const double *pr0 = row0;
+				for (; pb < b_end8; pb+=8, pr0+=8) {
+					s0=_mm_add_pd(s0, _mm_mul_pd(_mm_loadu_pd(pr0+0), _mm_loadu_pd(pb+0)));
+					s1=_mm_add_pd(s1, _mm_mul_pd(_mm_loadu_pd(pr0+2), _mm_loadu_pd(pb+2)));
+					s2=_mm_add_pd(s2, _mm_mul_pd(_mm_loadu_pd(pr0+4), _mm_loadu_pd(pb+4)));
+					s3=_mm_add_pd(s3, _mm_mul_pd(_mm_loadu_pd(pr0+6), _mm_loadu_pd(pb+6)));
+				}
+				__m128d rs = _mm_add_pd(_mm_add_pd(s0, s1), _mm_add_pd(s2, s3));
+				double acc = _mm_cvtsd_f64(_mm_add_sd(rs, _mm_unpackhi_pd(rs, rs)));
+				for (; pb < b_end; pb++, pr0++) acc += *pr0 * *pb;
+				c[i] = acc;
+			}
+		});
 	}
 	for (auto &th : threads) th.join();
 
@@ -97,7 +132,7 @@ inline void gemm(double *a, double *b, double *c, int N) {
 	/* TODO: put your own parallelized code here */
 	/* You don't have to parallelize all of your code - it's up to you. */
 
-		const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
+	const int T = std::max(1, std::min((int)std::thread::hardware_concurrency(), 32));
 	std::vector<std::thread> threads;
 	threads.reserve(T);
 	int chunk = N / T;
@@ -109,15 +144,14 @@ inline void gemm(double *a, double *b, double *c, int N) {
 				for (int j = 0; j < N; j++) c[i * N + j] = 0.0;
 			for (int i = start; i < end; i++)
 				for (int k = 0; k < N; k++) {
-					double aik = a[i * N + k];
+					__m128d aik_v = _mm_set1_pd(a[i * N + k]);
 					int j = 0;
-					for (; j <= N - 4; j += 4) {
-						c[i * N + j]     += aik * b[k * N + j];
-						c[i * N + j + 1] += aik * b[k * N + j + 1];
-						c[i * N + j + 2] += aik * b[k * N + j + 2];
-						c[i * N + j + 3] += aik * b[k * N + j + 3];
+					for (; j <= N - 2; j += 2) {
+						_mm_storeu_pd(c + i*N + j,
+							_mm_add_pd(_mm_loadu_pd(c + i*N + j),
+								_mm_mul_pd(aik_v, _mm_loadu_pd(b + k*N + j))));
 					}
-					for (; j < N; j++) c[i * N + j] += aik * b[k * N + j];
+					for (; j < N; j++) c[i*N+j] += a[i*N+k] * b[k*N+j];
 				}
 		});
 	}
