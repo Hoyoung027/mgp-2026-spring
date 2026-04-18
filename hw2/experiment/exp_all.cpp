@@ -68,8 +68,8 @@ void exp_gemm_vs_freivalds() {
     const int T_gemm = 32;
     const int T_gemv = 8;
 
-    const long long ops_gemm      = 2LL * N * N * N;
-    const long long ops_freivalds = 4LL * N * N;
+    const long long ops_gemm      = 1LL * N * N * N;
+    const long long ops_freivalds = 3LL * N * N;
 
     std::cout << "\n=== [Experiment 2] GEMM vs Freivalds (N=" << N
               << ", " << RUNS << " runs) ===\n";
