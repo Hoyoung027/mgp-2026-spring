@@ -124,7 +124,7 @@ void exp_gemm_vs_freivalds() {
 // ============================================================
 void exp_versions(const std::string &func) {
     const int T_gemv = 8;
-    const int T_gemm = 32;
+    const int T_gemm = 8;
 
     std::cout << "\n=== [Experiment 3] Version Comparison: " << func
               << " (" << RUNS << " runs) ===\n";
