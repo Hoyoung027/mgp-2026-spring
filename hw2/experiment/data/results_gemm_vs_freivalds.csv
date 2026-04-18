@@ -1,0 +1,3 @@
+method,ops,avg_sec
+gemm,17179869184,1.10642
+freivalds,16777216,0.0287089
