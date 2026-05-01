@@ -12,3 +12,5 @@ hw*/*.DS_Store
 hw*/*.zip
 !mgp*/
 !mgp*/**
+*DS_Store
+*.DS_Store
