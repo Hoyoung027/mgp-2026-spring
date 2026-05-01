@@ -5,7 +5,7 @@ build:
 run:
         ./build/main
 
-clean: 
+clean:
         rm -rf build
 
 format:
