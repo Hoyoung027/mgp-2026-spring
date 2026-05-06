@@ -26,7 +26,18 @@ using namespace nvcuda;
 #define CHUNK_K       32                            // K-step per outer iteration
 
 __device__ __forceinline__ float to_tf32(float x) {
-    return __float_to_tf32(x);
+    unsigned int bits = __float_as_uint(x);
+    unsigned int exp = bits & 0x7f800000u;
+
+    // Preserve NaN/Inf exactly.
+    if (exp == 0x7f800000u)
+        return x;
+
+    // Round FP32 mantissa (23 bits) to TF32-like mantissa (10 bits).
+    // This drops 13 LSBs with round-to-nearest-even behavior.
+    bits += 0x00000fffu + ((bits >> 13) & 1u);
+    bits &= 0xffffe000u;
+    return __uint_as_float(bits);
 }
 
 // xA = x @ A.T  [B, r]
