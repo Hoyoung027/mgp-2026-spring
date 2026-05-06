@@ -25,6 +25,10 @@ using namespace nvcuda;
 #define BLOCK_THREADS (WARP_M * WARP_N * 32)       // 128
 #define CHUNK_K       32                            // K-step per outer iteration
 
+__device__ __forceinline__ float to_tf32(float x) {
+    return __float_to_tf32(x);
+}
+
 // xA = x @ A.T  [B, r]
 __global__ void kernel_xA(const float *x, const float *A, float *xA,
                            int B, int in_dim, int r) {
@@ -68,7 +72,7 @@ __global__ void kernel_wmma_lora(const float *__restrict__ x,
             int m_loc  = idx / CHUNK_K;
             int k_loc  = idx % CHUNK_K;
             int m      = block_m + m_loc;
-            sX[m_loc][k_loc] = (m < B) ? x[m * K + k0 + k_loc] : 0.0f;
+            sX[m_loc][k_loc] = (m < B) ? to_tf32(x[m * K + k0 + k_loc]) : 0.0f;
         }
 
         // Load sW: same pattern; sW[n][k] = W[n][k], interpreted col_major = W.T
@@ -78,7 +82,7 @@ __global__ void kernel_wmma_lora(const float *__restrict__ x,
             int n_loc  = idx / CHUNK_K;
             int k_loc  = idx % CHUNK_K;
             int n      = block_n + n_loc;
-            sW[n_loc][k_loc] = (n < N) ? W[n * K + k0 + k_loc] : 0.0f;
+            sW[n_loc][k_loc] = (n < N) ? to_tf32(W[n * K + k0 + k_loc]) : 0.0f;
         }
 
         __syncthreads();
