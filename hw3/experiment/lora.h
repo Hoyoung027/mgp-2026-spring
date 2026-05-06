@@ -1,24 +1,29 @@
 #include "cuda_runtime.h"
 
 // ── Tunable dimensions ────────────────────────────────────────────────────────
-// BLK_X  : threadIdx.x → output (N) tile width
-// BLK_Y  : threadIdx.y → batch  (M) tile height
+// BLK_X  : output (N) tile width
+// BLK_Y  : batch  (M) tile height
+// OUTS_PER_THREAD : outputs computed by one thread along N
+// THREADS_X : threadIdx.x width
 // TILE_K : K-step per iteration = BLK_X * 4  (float4: 1 load covers 4 K values)
 //
-// sX load : BLK_Y × TILE_K elements, 1 float4 per thread   (256 threads × 4 = 1024 ✓)
-// sW load : BLK_X × TILE_K elements, BLK_X/BLK_Y float4s per thread
+// sX load : BLK_Y × TILE_K elements, 2 float4s per thread  (128 threads × 8 = 1024 ✓)
+// sW load : BLK_X × TILE_K elements, 8 float4s per thread
 //
 // Constraints (static_assert enforces):
-//   BLK_X % BLK_Y == 0        (integer sW load rounds)
-//   BLK_X * BLK_Y <= 1024     (CUDA max threads/block)
+//   BLK_X % OUTS_PER_THREAD == 0
+//   THREADS_X * BLK_Y <= 1024
 //   K=4096 and N=4096 both divisible by TILE_K
 // ─────────────────────────────────────────────────────────────────────────────
 #define BLK_X  32
 #define BLK_Y  8
+#define OUTS_PER_THREAD 2
+#define THREADS_X (BLK_X / OUTS_PER_THREAD)
 #define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
 
-static_assert(BLK_X % BLK_Y == 0,       "BLK_X must be divisible by BLK_Y");
-static_assert(BLK_X * BLK_Y <= 1024,    "threads/block exceeds CUDA limit");
+static_assert(BLK_X % OUTS_PER_THREAD == 0,
+              "BLK_X must be divisible by OUTS_PER_THREAD");
+static_assert(THREADS_X * BLK_Y <= 1024, "threads/block exceeds CUDA limit");
 
 // xA = x @ A.T
 // x: [B, in_dim], A: [r, in_dim] → xA: [B, r]
@@ -58,11 +63,14 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
     const int by = blockIdx.y;
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
+    const int tid = ty * THREADS_X + tx;
 
     const int b = by * BLK_Y + ty;
-    const int o = bx * BLK_X + tx;
+    const int o0 = bx * BLK_X + tx;
+    const int o1 = o0 + THREADS_X;
 
-    float val = 0.0f;
+    float val0 = 0.0f;
+    float val1 = 0.0f;
 
     if (tx < 8) {
         sXA[ty][tx] = (b < B) ? xA[b * r + tx] : 0.0f;
@@ -70,43 +78,78 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
     __syncthreads();
 
     for (int kt = 0; kt < K / TILE_K; kt++) {
-        // sX: 1 float4 per thread — 32 threads × 4 floats = 128 = one sX row
-        // global load: x[b][kt*TILE_K + tx*4 .. tx*4+3], coalesced across warp
-        if (b < B) {
-            float4 xv = *reinterpret_cast<const float4 *>(&x[b * K + kt * TILE_K + tx * 4]);
-            sX[ty][tx*4+0] = xv.x;  sX[ty][tx*4+1] = xv.y;
-            sX[ty][tx*4+2] = xv.z;  sX[ty][tx*4+3] = xv.w;
-        } else {
-            sX[ty][tx*4+0] = sX[ty][tx*4+1] = sX[ty][tx*4+2] = sX[ty][tx*4+3] = 0.0f;
+        // sX: 2 float4s per thread via linearized mapping.
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            int idx4 = tid + i * (THREADS_X * BLK_Y);
+            int x_row_local = idx4 / (TILE_K / 4);
+            int k4 = idx4 % (TILE_K / 4);
+            int x_row = by * BLK_Y + x_row_local;
+
+            if (x_row < B) {
+                float4 xv = *reinterpret_cast<const float4 *>(
+                    &x[x_row * K + kt * TILE_K + k4 * 4]);
+                sX[x_row_local][k4 * 4 + 0] = xv.x;
+                sX[x_row_local][k4 * 4 + 1] = xv.y;
+                sX[x_row_local][k4 * 4 + 2] = xv.z;
+                sX[x_row_local][k4 * 4 + 3] = xv.w;
+            } else {
+                sX[x_row_local][k4 * 4 + 0] = 0.0f;
+                sX[x_row_local][k4 * 4 + 1] = 0.0f;
+                sX[x_row_local][k4 * 4 + 2] = 0.0f;
+                sX[x_row_local][k4 * 4 + 3] = 0.0f;
+            }
         }
 
-        // sW: BLK_X/BLK_Y float4s per thread — covers all BLK_X output rows
-        // round i: thread (ty,tx) loads sW[ty+i*BLK_Y][tx*4..tx*4+3]
-        // global load: W[w_row][kt*TILE_K + tx*4 .. tx*4+3], coalesced across warp
+        // sW: 8 float4s per thread via linearized mapping.
         #pragma unroll
-        for (int i = 0; i < BLK_X / BLK_Y; i++) {
-            int w_local = ty + i * BLK_Y;
-            int w_row   = bx * BLK_X + w_local;
-            float4 wv = *reinterpret_cast<const float4 *>(&W[w_row * K + kt * TILE_K + tx * 4]);
-            sW[w_local][tx*4+0] = wv.x;  sW[w_local][tx*4+1] = wv.y;
-            sW[w_local][tx*4+2] = wv.z;  sW[w_local][tx*4+3] = wv.w;
+        for (int i = 0; i < 8; i++) {
+            int idx4 = tid + i * (THREADS_X * BLK_Y);
+            int w_local = idx4 / (TILE_K / 4);
+            int k4 = idx4 % (TILE_K / 4);
+            int w_row = bx * BLK_X + w_local;
+
+            if (w_row < N) {
+                float4 wv = *reinterpret_cast<const float4 *>(
+                    &W[w_row * K + kt * TILE_K + k4 * 4]);
+                sW[w_local][k4 * 4 + 0] = wv.x;
+                sW[w_local][k4 * 4 + 1] = wv.y;
+                sW[w_local][k4 * 4 + 2] = wv.z;
+                sW[w_local][k4 * 4 + 3] = wv.w;
+            } else {
+                sW[w_local][k4 * 4 + 0] = 0.0f;
+                sW[w_local][k4 * 4 + 1] = 0.0f;
+                sW[w_local][k4 * 4 + 2] = 0.0f;
+                sW[w_local][k4 * 4 + 3] = 0.0f;
+            }
         }
 
         __syncthreads();
 
         #pragma unroll
-        for (int tk = 0; tk < TILE_K; tk++)
-            val += sX[ty][tk] * sW[tx][tk];
+        for (int tk = 0; tk < TILE_K; tk++) {
+            float xv = sX[ty][tk];
+            val0 += xv * sW[tx][tk];
+            val1 += xv * sW[tx + THREADS_X][tk];
+        }
 
         __syncthreads();
     }
 
-    if (b < B && o < N) {
-        float lora_val = 0.0f;
+    if (b < B && o0 < N) {
+        float lora_val0 = 0.0f;
         #pragma unroll
         for (int ri = 0; ri < 8; ri++)
-            lora_val += sXA[ty][ri] * B_mat[o * r + ri];
-        y[b * N + o] = val + scale * lora_val;
+            lora_val0 += sXA[ty][ri] * B_mat[o0 * r + ri];
+        y[b * N + o0] = val0 + scale * lora_val0;
+    }
+
+    if (b < B && o1 < N) {
+        float lora_val1 = 0.0f;
+        #pragma unroll
+        for (int ri = 0; ri < 8; ri++)
+            lora_val1 += sXA[ty][ri] * B_mat[o1 * r + ri];
+        y[b * N + o1] = val1 + scale * lora_val1;
     }
 }
 
@@ -121,7 +164,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
     kernel_xA<<<B, r>>>(d_x, d_A, d_xA, B, in_dim, r);
 
     // Kernel 2: y = x @ W.T + scale * xA @ B.T (fused, tiled)
-    dim3 block(BLK_X, BLK_Y);
+    dim3 block(THREADS_X, BLK_Y);
     dim3 grid((out_dim + BLK_X - 1) / BLK_X, (B + BLK_Y - 1) / BLK_Y);
     kernel_xWT_fused<<<grid, block>>>(d_x, d_W, d_xA, d_B, d_y,
                                       B, in_dim, out_dim, r, scale);
