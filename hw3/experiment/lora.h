@@ -17,7 +17,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #define BLK_X  32
 #define BLK_Y  8
-#define OUTS_PER_THREAD 4
+#define OUTS_PER_THREAD 2
 #define THREADS_X (BLK_X / OUTS_PER_THREAD)
 #define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
 #define THREADS_PER_BLOCK (THREADS_X * BLK_Y)
