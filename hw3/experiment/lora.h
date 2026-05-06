@@ -52,6 +52,7 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
                                   int B, int K, int N, int r, float scale) {
     __shared__ float sX[BLK_Y][TILE_K];
     __shared__ float sW[BLK_X][TILE_K + 1];
+    __shared__ float sXA[BLK_Y][8];
 
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
@@ -62,6 +63,11 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
     const int o = bx * BLK_X + tx;
 
     float val = 0.0f;
+
+    if (tx < 8) {
+        sXA[ty][tx] = (b < B) ? xA[b * r + tx] : 0.0f;
+    }
+    __syncthreads();
 
     for (int kt = 0; kt < K / TILE_K; kt++) {
         // sX: 1 float4 per thread — 32 threads × 4 floats = 128 = one sX row
@@ -99,15 +105,17 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
         float lora_val = 0.0f;
         #pragma unroll
         for (int ri = 0; ri < 8; ri++)
-            lora_val += xA[b * r + ri] * B_mat[o * r + ri];
+            lora_val += sXA[ty][ri] * B_mat[o * r + ri];
         y[b * N + o] = val + scale * lora_val;
     }
 }
 
 void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
           int B, int in_dim, int out_dim, int r, float scale) {
-    float *d_xA;
-    cudaMalloc(&d_xA, B * r * sizeof(float));
+    static float *d_xA = nullptr;
+    if (d_xA == nullptr) {
+        cudaMalloc(&d_xA, B * r * sizeof(float));
+    }
 
     // Kernel 1: xA = x @ A.T  [32, 8]
     kernel_xA<<<B, r>>>(d_x, d_A, d_xA, B, in_dim, r);
@@ -117,6 +125,4 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
     dim3 grid((out_dim + BLK_X - 1) / BLK_X, (B + BLK_Y - 1) / BLK_Y);
     kernel_xWT_fused<<<grid, block>>>(d_x, d_W, d_xA, d_B, d_y,
                                       B, in_dim, out_dim, r, scale);
-
-    cudaFree(d_xA);
 }
