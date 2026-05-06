@@ -7,8 +7,8 @@
 // THREADS_X : threadIdx.x width
 // TILE_K : K-step per iteration = BLK_X * 4  (float4: 1 load covers 4 K values)
 //
-// sX load : BLK_Y × TILE_K elements, 2 float4s per thread  (128 threads × 8 = 1024 ✓)
-// sW load : BLK_X × TILE_K elements, 8 float4s per thread
+// sX load : BLK_Y x TILE_K elements, SX_LOADS_PER_THREAD float4s per thread
+// sW load : BLK_X x TILE_K elements, SW_LOADS_PER_THREAD float4s per thread
 //
 // Constraints (static_assert enforces):
 //   BLK_X % OUTS_PER_THREAD == 0
@@ -16,14 +16,24 @@
 //   K=4096 and N=4096 both divisible by TILE_K
 // ─────────────────────────────────────────────────────────────────────────────
 #define BLK_X  32
-#define BLK_Y  8
+#define BLK_Y  4
 #define OUTS_PER_THREAD 2
 #define THREADS_X (BLK_X / OUTS_PER_THREAD)
 #define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
+#define THREADS_PER_BLOCK (THREADS_X * BLK_Y)
+#define K_FLOAT4S (TILE_K / 4)
+#define SX_FLOAT4S (BLK_Y * K_FLOAT4S)
+#define SW_FLOAT4S (BLK_X * K_FLOAT4S)
+#define SX_LOADS_PER_THREAD (SX_FLOAT4S / THREADS_PER_BLOCK)
+#define SW_LOADS_PER_THREAD (SW_FLOAT4S / THREADS_PER_BLOCK)
 
 static_assert(BLK_X % OUTS_PER_THREAD == 0,
               "BLK_X must be divisible by OUTS_PER_THREAD");
 static_assert(THREADS_X * BLK_Y <= 1024, "threads/block exceeds CUDA limit");
+static_assert(SX_FLOAT4S % THREADS_PER_BLOCK == 0,
+              "sX float4 loads must divide evenly across block threads");
+static_assert(SW_FLOAT4S % THREADS_PER_BLOCK == 0,
+              "sW float4 loads must divide evenly across block threads");
 
 // xA = x @ A.T
 // x: [B, in_dim], A: [r, in_dim] → xA: [B, r]
@@ -43,8 +53,8 @@ __global__ void kernel_xA(const float *x, const float *A, float *xA,
 // x: [B, K], W: [N, K], xA: [B, r], B_mat: [N, r] → y: [B, N]
 //
 // TILE_K=128: each K iteration loads 128 values via float4
-//   sX[BLK_Y][TILE_K]   : 1 float4/thread, 32 threads × 4 floats = 128 = one row ✓
-//   sW[BLK_X][TILE_K+1] : (BLK_X/BLK_Y) float4s/thread, covers all 32 output rows ✓
+//   sX[BLK_Y][TILE_K]   : loaded with SX_LOADS_PER_THREAD float4s/thread
+//   sW[BLK_X][TILE_K+1] : loaded with SW_LOADS_PER_THREAD float4s/thread
 //   +1 col padding: bank(sW[tx][tk]) = (tx*129+tk)%32, gcd(129,32)=1 → no conflict ✓
 //
 // K iterations: K/TILE_K = 32  (was 128),  __syncthreads: 64  (was 256)
@@ -78,9 +88,9 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
     __syncthreads();
 
     for (int kt = 0; kt < K / TILE_K; kt++) {
-        // sX: 2 float4s per thread via linearized mapping.
+        // sX: fill the whole [BLK_Y][TILE_K] tile with linearized float4 loads.
         #pragma unroll
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < SX_LOADS_PER_THREAD; i++) {
             int idx4 = tid + i * (THREADS_X * BLK_Y);
             int x_row_local = idx4 / (TILE_K / 4);
             int k4 = idx4 % (TILE_K / 4);
@@ -101,9 +111,9 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
             }
         }
 
-        // sW: 8 float4s per thread via linearized mapping.
+        // sW: fill the whole [BLK_X][TILE_K] tile with linearized float4 loads.
         #pragma unroll
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < SW_LOADS_PER_THREAD; i++) {
             int idx4 = tid + i * (THREADS_X * BLK_Y);
             int w_local = idx4 / (TILE_K / 4);
             int k4 = idx4 % (TILE_K / 4);
