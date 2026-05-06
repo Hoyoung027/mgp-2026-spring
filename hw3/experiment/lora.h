@@ -16,8 +16,8 @@
 //   K=4096 and N=4096 both divisible by TILE_K
 // ─────────────────────────────────────────────────────────────────────────────
 #define BLK_X  32
-#define BLK_Y  4
-#define OUTS_PER_THREAD 2
+#define BLK_Y  8
+#define OUTS_PER_THREAD 4
 #define THREADS_X (BLK_X / OUTS_PER_THREAD)
 #define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
 #define THREADS_PER_BLOCK (THREADS_X * BLK_Y)
@@ -76,11 +76,12 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
     const int tid = ty * THREADS_X + tx;
 
     const int b = by * BLK_Y + ty;
-    const int o0 = bx * BLK_X + tx;
-    const int o1 = o0 + THREADS_X;
+    const int o_base = bx * BLK_X + tx;
 
-    float val0 = 0.0f;
-    float val1 = 0.0f;
+    float val[OUTS_PER_THREAD];
+    #pragma unroll
+    for (int j = 0; j < OUTS_PER_THREAD; j++)
+        val[j] = 0.0f;
 
     if (tx < 8) {
         sXA[ty][tx] = (b < B) ? xA[b * r + tx] : 0.0f;
@@ -139,27 +140,24 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
         #pragma unroll
         for (int tk = 0; tk < TILE_K; tk++) {
             float xv = sX[ty][tk];
-            val0 += xv * sW[tx][tk];
-            val1 += xv * sW[tx + THREADS_X][tk];
+            #pragma unroll
+            for (int j = 0; j < OUTS_PER_THREAD; j++)
+                val[j] += xv * sW[tx + j * THREADS_X][tk];
         }
 
         __syncthreads();
     }
 
-    if (b < B && o0 < N) {
-        float lora_val0 = 0.0f;
-        #pragma unroll
-        for (int ri = 0; ri < 8; ri++)
-            lora_val0 += sXA[ty][ri] * B_mat[o0 * r + ri];
-        y[b * N + o0] = val0 + scale * lora_val0;
-    }
-
-    if (b < B && o1 < N) {
-        float lora_val1 = 0.0f;
-        #pragma unroll
-        for (int ri = 0; ri < 8; ri++)
-            lora_val1 += sXA[ty][ri] * B_mat[o1 * r + ri];
-        y[b * N + o1] = val1 + scale * lora_val1;
+    #pragma unroll
+    for (int j = 0; j < OUTS_PER_THREAD; j++) {
+        int o = o_base + j * THREADS_X;
+        if (b < B && o < N) {
+            float lora_val = 0.0f;
+            #pragma unroll
+            for (int ri = 0; ri < 8; ri++)
+                lora_val += sXA[ty][ri] * B_mat[o * r + ri];
+            y[b * N + o] = val[j] + scale * lora_val;
+        }
     }
 }
 
