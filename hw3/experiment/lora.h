@@ -1,46 +1,28 @@
 #include "cuda_runtime.h"
-#include <mma.h>
-using namespace nvcuda;
 
-// ── WMMA TF32 tiled LoRA kernel ───────────────────────────────────────────────
-// Tensor-core fragment shape: M=16, N=16, K=8
-// Warp tile:   WARP_M × WARP_N = 2 × 2 WMMA fragments → 32×32 per block
-// Block:       4 warps = 128 threads
-// Shared mem:  sX[32][32] + sW[32][32] = 8KB  (well under 48KB L1 limit)
+// ── Tunable dimensions ────────────────────────────────────────────────────────
+// BLK_X  : threadIdx.x → output (N) tile width
+// BLK_Y  : threadIdx.y → batch  (M) tile height
+// TILE_K : K-step per iteration = BLK_X * 4  (float4: 1 load covers 4 K values)
 //
-// Compute: y = x @ W.T + scale * xA @ B.T
-//   Phase 1 (K-loop): accumulate c_frag = x_tile @ W_tile.T via mma_sync
-//   Phase 2 (store):  write c_frag → sX, then fuse LoRA in global write
+// sX load : BLK_Y × TILE_K elements, 1 float4 per thread   (256 threads × 4 = 1024 ✓)
+// sW load : BLK_X × TILE_K elements, BLK_X/BLK_Y float4s per thread
 //
-// W.T trick: load sW[n][k] = W[n][k] with col_major B fragment
-//   → WMMA interprets column-major [K×N] which equals row-major [N×K] = W ✓
+// Constraints (static_assert enforces):
+//   BLK_X % BLK_Y == 0        (integer sW load rounds)
+//   BLK_X * BLK_Y <= 1024     (CUDA max threads/block)
+//   K=4096 and N=4096 both divisible by TILE_K
 // ─────────────────────────────────────────────────────────────────────────────
-#define WMMA_M        16
-#define WMMA_N        16
-#define WMMA_K        8
-#define WARP_M        2
-#define WARP_N        2
-#define BLOCK_M       (WARP_M * WMMA_M)            // 32
-#define BLOCK_N       (WARP_N * WMMA_N)            // 32
-#define BLOCK_THREADS (WARP_M * WARP_N * 32)       // 128
-#define CHUNK_K       32                            // K-step per outer iteration
+#define BLK_X  32
+#define BLK_Y  8
+#define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
 
-__device__ __forceinline__ float to_tf32(float x) {
-    unsigned int bits = __float_as_uint(x);
-    unsigned int exp = bits & 0x7f800000u;
+static_assert(BLK_X % BLK_Y == 0,       "BLK_X must be divisible by BLK_Y");
+static_assert(BLK_X * BLK_Y <= 1024,    "threads/block exceeds CUDA limit");
 
-    // Preserve NaN/Inf exactly.
-    if (exp == 0x7f800000u)
-        return x;
-
-    // Round FP32 mantissa (23 bits) to TF32-like mantissa (10 bits).
-    // This drops 13 LSBs with round-to-nearest-even behavior.
-    bits += 0x00000fffu + ((bits >> 13) & 1u);
-    bits &= 0xffffe000u;
-    return __uint_as_float(bits);
-}
-
-// xA = x @ A.T  [B, r]
+// xA = x @ A.T
+// x: [B, in_dim], A: [r, in_dim] → xA: [B, r]
+// B=32, r=8 → 256 elements total; simple one-thread-per-output kernel
 __global__ void kernel_xA(const float *x, const float *A, float *xA,
                            int B, int in_dim, int r) {
     int b  = blockIdx.x;
@@ -52,94 +34,73 @@ __global__ void kernel_xA(const float *x, const float *A, float *xA,
     xA[b * r + ri] = val;
 }
 
-// y = x @ W.T + scale * xA @ B.T  (WMMA TF32 tiled, fused LoRA)
-__global__ void kernel_wmma_lora(const float *__restrict__ x,
+// y = x @ W.T + scale * xA @ B_mat.T  (fused, float4 tiled shared memory)
+// x: [B, K], W: [N, K], xA: [B, r], B_mat: [N, r] → y: [B, N]
+//
+// TILE_K=128: each K iteration loads 128 values via float4
+//   sX[BLK_Y][TILE_K]   : 1 float4/thread, 32 threads × 4 floats = 128 = one row ✓
+//   sW[BLK_X][TILE_K+1] : (BLK_X/BLK_Y) float4s/thread, covers all 32 output rows ✓
+//   +1 col padding: bank(sW[tx][tk]) = (tx*129+tk)%32, gcd(129,32)=1 → no conflict ✓
+//
+// K iterations: K/TILE_K = 32  (was 128),  __syncthreads: 64  (was 256)
+// LoRA fused at final store: r=8 dot product, no extra y round-trip
+__global__ void kernel_xWT_fused(const float *__restrict__ x,
                                   const float *__restrict__ W,
                                   const float *__restrict__ xA,
                                   const float *__restrict__ B_mat,
                                   float *y,
                                   int B, int K, int N, int r, float scale) {
-    // sX reused as output buffer after K-loop
-    __shared__ float sX[BLOCK_M][CHUNK_K];   // [32][32] = 4KB
-    __shared__ float sW[BLOCK_N][CHUNK_K];   // [32][32] = 4KB
+    __shared__ float sX[BLK_Y][TILE_K];
+    __shared__ float sW[BLK_X][TILE_K + 1];
 
-    const int tid     = threadIdx.x;
-    const int warp_id = tid / 32;
-    const int warp_m  = warp_id / WARP_N;
-    const int warp_n  = warp_id % WARP_N;
-    const int block_m = blockIdx.y * BLOCK_M;
-    const int block_n = blockIdx.x * BLOCK_N;
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
 
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
-    wmma::fill_fragment(c_frag, 0.0f);
+    const int b = by * BLK_Y + ty;
+    const int o = bx * BLK_X + tx;
 
-    for (int chunk = 0; chunk < K / CHUNK_K; chunk++) {
-        const int k0 = chunk * CHUNK_K;
+    float val = 0.0f;
 
-        // Load sX: 128 threads × 8 elements = 1024 = 32×32 ✓
-        #pragma unroll
-        for (int i = 0; i < BLOCK_M * CHUNK_K / BLOCK_THREADS; i++) {
-            int idx    = tid + i * BLOCK_THREADS;
-            int m_loc  = idx / CHUNK_K;
-            int k_loc  = idx % CHUNK_K;
-            int m      = block_m + m_loc;
-            sX[m_loc][k_loc] = (m < B) ? to_tf32(x[m * K + k0 + k_loc]) : 0.0f;
+    for (int kt = 0; kt < K / TILE_K; kt++) {
+        // sX: 1 float4 per thread — 32 threads × 4 floats = 128 = one sX row
+        // global load: x[b][kt*TILE_K + tx*4 .. tx*4+3], coalesced across warp
+        if (b < B) {
+            float4 xv = *reinterpret_cast<const float4 *>(&x[b * K + kt * TILE_K + tx * 4]);
+            sX[ty][tx*4+0] = xv.x;  sX[ty][tx*4+1] = xv.y;
+            sX[ty][tx*4+2] = xv.z;  sX[ty][tx*4+3] = xv.w;
+        } else {
+            sX[ty][tx*4+0] = sX[ty][tx*4+1] = sX[ty][tx*4+2] = sX[ty][tx*4+3] = 0.0f;
         }
 
-        // Load sW: same pattern; sW[n][k] = W[n][k], interpreted col_major = W.T
+        // sW: BLK_X/BLK_Y float4s per thread — covers all BLK_X output rows
+        // round i: thread (ty,tx) loads sW[ty+i*BLK_Y][tx*4..tx*4+3]
+        // global load: W[w_row][kt*TILE_K + tx*4 .. tx*4+3], coalesced across warp
         #pragma unroll
-        for (int i = 0; i < BLOCK_N * CHUNK_K / BLOCK_THREADS; i++) {
-            int idx    = tid + i * BLOCK_THREADS;
-            int n_loc  = idx / CHUNK_K;
-            int k_loc  = idx % CHUNK_K;
-            int n      = block_n + n_loc;
-            sW[n_loc][k_loc] = (n < N) ? to_tf32(W[n * K + k0 + k_loc]) : 0.0f;
+        for (int i = 0; i < BLK_X / BLK_Y; i++) {
+            int w_local = ty + i * BLK_Y;
+            int w_row   = bx * BLK_X + w_local;
+            float4 wv = *reinterpret_cast<const float4 *>(&W[w_row * K + kt * TILE_K + tx * 4]);
+            sW[w_local][tx*4+0] = wv.x;  sW[w_local][tx*4+1] = wv.y;
+            sW[w_local][tx*4+2] = wv.z;  sW[w_local][tx*4+3] = wv.w;
         }
 
         __syncthreads();
 
         #pragma unroll
-        for (int wk = 0; wk < CHUNK_K / WMMA_K; wk++) {
-            wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K,
-                           wmma::precision::tf32, wmma::row_major> a_frag;
-            wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K,
-                           wmma::precision::tf32, wmma::col_major> b_frag;
-
-            // a: sX[warp_m*16 : (warp_m+1)*16][wk*8 : (wk+1)*8], row_major, stride=CHUNK_K
-            wmma::load_matrix_sync(a_frag,
-                                   &sX[warp_m * WMMA_M][wk * WMMA_K],
-                                   CHUNK_K);
-            // b: sW[warp_n*16 : (warp_n+1)*16][wk*8 : (wk+1)*8], col_major, stride=CHUNK_K
-            //    col_major means WMMA reads sW as [K×N], which equals W[n][k] = W.T[k][n] ✓
-            wmma::load_matrix_sync(b_frag,
-                                   &sW[warp_n * WMMA_N][wk * WMMA_K],
-                                   CHUNK_K);
-            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-        }
+        for (int tk = 0; tk < TILE_K; tk++)
+            val += sX[ty][tk] * sW[tx][tk];
 
         __syncthreads();
     }
 
-    // Store c_frag back to sX (output: [BLOCK_M][BLOCK_N] = [32][32], stride=BLOCK_N)
-    wmma::store_matrix_sync(&sX[warp_m * WMMA_M][warp_n * WMMA_N],
-                             c_frag, BLOCK_N, wmma::mem_row_major);
-    __syncthreads();
-
-    // Write to global y, fusing LoRA add
-    #pragma unroll
-    for (int i = 0; i < BLOCK_M * BLOCK_N / BLOCK_THREADS; i++) {
-        int idx    = tid + i * BLOCK_THREADS;
-        int m_loc  = idx / BLOCK_N;
-        int n_loc  = idx % BLOCK_N;
-        int m      = block_m + m_loc;
-        int n      = block_n + n_loc;
-        if (m < B && n < N) {
-            float lv = 0.0f;
-            #pragma unroll
-            for (int ri = 0; ri < 8; ri++)
-                lv += xA[m * r + ri] * B_mat[n * r + ri];
-            y[m * N + n] = sX[m_loc][n_loc] + scale * lv;
-        }
+    if (b < B && o < N) {
+        float lora_val = 0.0f;
+        #pragma unroll
+        for (int ri = 0; ri < 8; ri++)
+            lora_val += xA[b * r + ri] * B_mat[o * r + ri];
+        y[b * N + o] = val + scale * lora_val;
     }
 }
 
@@ -148,12 +109,13 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
     float *d_xA;
     cudaMalloc(&d_xA, B * r * sizeof(float));
 
+    // Kernel 1: xA = x @ A.T  [32, 8]
     kernel_xA<<<B, r>>>(d_x, d_A, d_xA, B, in_dim, r);
 
-    dim3 block(BLOCK_THREADS);
-    dim3 grid((out_dim + BLOCK_N - 1) / BLOCK_N,
-              (B      + BLOCK_M - 1) / BLOCK_M);
-    kernel_wmma_lora<<<grid, block>>>(d_x, d_W, d_xA, d_B, d_y,
+    // Kernel 2: y = x @ W.T + scale * xA @ B.T (fused, tiled)
+    dim3 block(BLK_X, BLK_Y);
+    dim3 grid((out_dim + BLK_X - 1) / BLK_X, (B + BLK_Y - 1) / BLK_Y);
+    kernel_xWT_fused<<<grid, block>>>(d_x, d_W, d_xA, d_B, d_y,
                                       B, in_dim, out_dim, r, scale);
 
     cudaFree(d_xA);
