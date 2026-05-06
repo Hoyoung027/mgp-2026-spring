@@ -15,7 +15,7 @@
 // Candidates for step 2: (32,32) (32,16) (32,8) (16,16)
 // ─────────────────────────────────────────────────────────────────────────────
 #define BLK_X 32
-#define BLK_Y 32
+#define BLK_Y 8
 
 static_assert(BLK_X % BLK_Y == 0,       "BLK_X must be divisible by BLK_Y");
 static_assert(BLK_X * BLK_Y <= 1024,    "threads/block exceeds CUDA limit");
