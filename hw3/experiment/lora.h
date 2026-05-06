@@ -152,10 +152,12 @@ __global__ void kernel_xWT_fused(const float *__restrict__ x,
     for (int j = 0; j < OUTS_PER_THREAD; j++) {
         int o = o_base + j * THREADS_X;
         if (b < B && o < N) {
-            float lora_val = 0.0f;
-            #pragma unroll
-            for (int ri = 0; ri < 8; ri++)
-                lora_val += sXA[ty][ri] * B_mat[o * r + ri];
+            const float4 b0 = *reinterpret_cast<const float4 *>(&B_mat[o * r]);
+            const float4 b1 = *reinterpret_cast<const float4 *>(&B_mat[o * r + 4]);
+            float lora_val = sXA[ty][0] * b0.x + sXA[ty][1] * b0.y +
+                             sXA[ty][2] * b0.z + sXA[ty][3] * b0.w +
+                             sXA[ty][4] * b1.x + sXA[ty][5] * b1.y +
+                             sXA[ty][6] * b1.z + sXA[ty][7] * b1.w;
             y[b * N + o] = val[j] + scale * lora_val;
         }
     }
