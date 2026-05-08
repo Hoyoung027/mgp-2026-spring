@@ -26,7 +26,7 @@
 #define SW_FLOAT4S (BLK_X * K_FLOAT4S)
 #define SX_LOADS_PER_THREAD (SX_FLOAT4S / THREADS_PER_BLOCK)
 #define SW_LOADS_PER_THREAD (SW_FLOAT4S / THREADS_PER_BLOCK)
-#define XA_THREADS 128
+#define XA_THREADS 32
 
 static_assert(BLK_X % OUTS_PER_THREAD == 0,
               "BLK_X must be divisible by OUTS_PER_THREAD");

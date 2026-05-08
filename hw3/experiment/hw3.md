@@ -5,7 +5,7 @@
 현재 기준 구현 파일:
 [lora.h](/Users/hoyoung/Documents/yonsei/2026-1/멀티코어와GPU프로그래밍/mgp-2026-spring/hw3/experiment/lora.h)
 
-현재 baseline은 `Step 1: thread당 output 2개 계산`과 `Step 4: LoRA tail의 B_mat vectorized load`를 도입한 버전이다. 채점 서버 환경에서 아래 조건으로 측정했다.
+현재 baseline은 `Step 1: thread당 output 2개 계산`, `Step 4: LoRA tail의 B_mat vectorized load`, `Step 3: kernel_xA reduction`을 도입한 버전이다. 채점 서버 환경에서 아래 조건으로 측정했다.
 
 - GPU: NVIDIA GeForce RTX 3090
 - 빌드 옵션: `nvcc -std=c++11 -arch=sm_86`
@@ -15,50 +15,50 @@
 
 | 회차 | GPU | 실행 시간(ms) | 최대 절대 오차 |
 | --- | --- | ---: | ---: |
+| 1 | GPU 0 | 0.576 | 0.007324 |
+| 2 | GPU 1 | 0.573 | 0.007324 |
+| 3 | GPU 1 | 0.579 | 0.007324 |
+| 4 | GPU 0 | 0.578 | 0.007324 |
+| 5 | GPU 0 | 0.575 | 0.007324 |
+
+정리:
+
+- 최고 성능: `0.573 ms`
+- 최악 성능: `0.579 ms`
+- 평균 성능: `0.576 ms`
+- 정확도: `PASS` (`0.007324 < 0.01`)
+
+이 버전을 현재 제출 후보 baseline으로 사용한다.
+
+## 2. 이전 Baseline과 비교
+
+직전 baseline은 `OUTS_PER_THREAD=2`와 LoRA tail의 `B_mat float4 load`까지 적용했지만, `kernel_xA`는 기존의 1-thread-1-output 방식으로 계산하던 버전이었다.
+
+### 직전 baseline 5회 반복 측정 결과
+
+| 회차 | GPU | 실행 시간(ms) | 최대 절대 오차 |
+| --- | --- | ---: | ---: |
 | 1 | GPU 0 | 0.679 | 0.005859 |
 | 2 | GPU 0 | 0.684 | 0.005859 |
 | 3 | GPU 1 | 0.681 | 0.005859 |
 | 4 | GPU 1 | 0.674 | 0.005859 |
 | 5 | GPU 0 | 0.676 | 0.005859 |
 
-정리:
+직전 baseline 정리:
 
 - 최고 성능: `0.674 ms`
 - 최악 성능: `0.684 ms`
 - 평균 성능: `0.679 ms`
 - 정확도: `PASS` (`0.005859 < 0.01`)
 
-이 버전을 현재 제출 후보 baseline으로 사용한다.
-
-## 2. 이전 Baseline과 비교
-
-직전 baseline은 `OUTS_PER_THREAD=2`까지 적용했지만, LoRA tail에서 `B_mat`를 scalar load로 읽던 버전이었다.
-
-### 직전 baseline 5회 반복 측정 결과
-
-| 회차 | GPU | 실행 시간(ms) | 최대 절대 오차 |
-| --- | --- | ---: | ---: |
-| 1 | GPU 0 | 0.682 | 0.005859 |
-| 2 | GPU 0 | 0.683 | 0.005859 |
-| 3 | GPU 1 | 0.672 | 0.005859 |
-| 4 | GPU 0 | 0.688 | 0.005859 |
-| 5 | GPU 0 | 0.685 | 0.005859 |
-
-직전 baseline 정리:
-
-- 최고 성능: `0.672 ms`
-- 최악 성능: `0.688 ms`
-- 평균 성능: `0.682 ms`
-- 정확도: `PASS` (`0.005859 < 0.01`)
-
 현재 baseline은 직전 baseline 대비 아래만큼 개선되었다.
 
-- 최고 성능 기준: `0.672 ms -> 0.674 ms`
-- 최악 성능 기준: `0.688 ms -> 0.684 ms`
-- 평균 성능 기준: `0.682 ms -> 0.679 ms`
-- 정확도: 동일하게 `0.005859`
+- 최고 성능 기준: `0.674 ms -> 0.573 ms`
+- 최악 성능 기준: `0.684 ms -> 0.579 ms`
+- 평균 성능 기준: `0.679 ms -> 0.576 ms`
+- 정확도: `0.005859 -> 0.007324`
 
-채점은 5회 중 최대 실행 시간을 기준으로 하므로, 가장 중요한 비교값은 최악 성능이다. 현재 baseline은 직전 baseline 대비 worst-case 기준으로 약 `0.58%` 개선되었다.
+채점은 5회 중 최대 실행 시간을 기준으로 하므로, 가장 중요한 비교값은 최악 성능이다. 현재 baseline은 직전 baseline 대비 worst-case 기준으로 약 `15.35%` 개선되었다.
 
 이전 baseline은 `float4 load`, fused LoRA add, `xA` shared cache, `d_xA` lazy allocation까지 적용된 1-thread-1-output 버전이었다.
 
@@ -81,12 +81,12 @@
 
 현재 baseline은 이전 baseline 대비 아래만큼 개선되었다.
 
-- 최고 성능 기준: `0.714 ms -> 0.674 ms`
-- 최악 성능 기준: `0.727 ms -> 0.684 ms`
-- 평균 성능 기준: `0.720 ms -> 0.679 ms`
-- 정확도: 동일하게 `0.005859`
+- 최고 성능 기준: `0.714 ms -> 0.573 ms`
+- 최악 성능 기준: `0.727 ms -> 0.579 ms`
+- 평균 성능 기준: `0.720 ms -> 0.576 ms`
+- 정확도: `0.005859 -> 0.007324`
 
-채점은 5회 중 최대 실행 시간을 기준으로 하므로, 가장 중요한 비교값은 최악 성능이다. 현재 baseline은 worst-case 기준으로 약 `5.91%` 개선되었다.
+채점은 5회 중 최대 실행 시간을 기준으로 하므로, 가장 중요한 비교값은 최악 성능이다. 현재 baseline은 worst-case 기준으로 약 `20.36%` 개선되었다.
 
 ## 3. 현재 버전에서 도입한 것
 
@@ -101,8 +101,9 @@
 5. `d_xA`를 lazy allocation 하여, 측정 구간 안에서 반복적인 `cudaMalloc/cudaFree` 오버헤드를 제거했다.
 6. `OUTS_PER_THREAD=2`를 도입하여 thread 하나가 output column 2개를 계산하도록 바꿨다.
 7. LoRA tail에서 `B_mat`를 scalar 8회 load 대신 `float4` 2회 load로 읽도록 바꿨다.
+8. `kernel_xA`를 block reduction 방식으로 바꿔 `xA[b, ri]` 하나를 32개 thread가 나눠 계산하도록 했다.
 
-`Step 1`의 핵심은 `sX[ty][tk]`를 한 번 읽어 `o0`, `o1` 두 output에 재사용하는 것이다. 이를 위해 accumulator를 `val0`, `val1`로 나누고, `sW[tx][tk]`와 `sW[tx + THREADS_X][tk]`를 동시에 사용한다.
+`Step 1`의 핵심은 `sX[ty][tk]`를 한 번 읽어 여러 output에 재사용하는 것이다. 이를 위해 accumulator를 `val[OUTS_PER_THREAD]`로 두고, `sW[tx + j * THREADS_X][tk]`를 함께 사용한다.
 
 ## 4. 왜 이 버전을 Baseline으로 잡는가
 
@@ -112,6 +113,7 @@
 - `float4` 로드로 K 루프에서 global load instruction 수를 줄였다.
 - thread당 output 2개를 계산해 같은 `sX` 값을 더 많이 재사용한다.
 - LoRA tail에서 `B_mat[o, 0..7]`를 `float4` 두 번으로 읽어 scalar load와 loop overhead를 줄였다.
+- `xA = x @ A.T`에서 4096 길이 dot product를 여러 thread가 나눠 계산해 작은 커널의 latency를 크게 줄였다.
 - 5회 반복 측정에서 편차가 작다.
 
 채점은 5회 중 최대 실행 시간을 기준으로 하기 때문에, 최고 성능뿐 아니라 안정성도 중요하다.
@@ -149,6 +151,7 @@
 #define SW_FLOAT4S (BLK_X * K_FLOAT4S)
 #define SX_LOADS_PER_THREAD (SX_FLOAT4S / THREADS_PER_BLOCK)
 #define SW_LOADS_PER_THREAD (SW_FLOAT4S / THREADS_PER_BLOCK)
+#define XA_THREADS 32
 
 static_assert(BLK_X % OUTS_PER_THREAD == 0,
               "BLK_X must be divisible by OUTS_PER_THREAD");
@@ -159,17 +162,31 @@ static_assert(SW_FLOAT4S % THREADS_PER_BLOCK == 0,
               "sW float4 loads must divide evenly across block threads");
 
 // xA = x @ A.T
-// x: [B, in_dim], A: [r, in_dim] → xA: [B, r]
-// B=32, r=8 → 256 elements total; simple one-thread-per-output kernel
+// One block computes one xA[b, ri], splitting the 4096-wide dot product.
 __global__ void kernel_xA(const float *x, const float *A, float *xA,
                            int B, int in_dim, int r) {
-    int b  = blockIdx.x;
-    int ri = threadIdx.x;
-    if (b >= B || ri >= r) return;
+    __shared__ float partial[XA_THREADS];
+
+    const int b = blockIdx.x;
+    const int ri = blockIdx.y;
+    const int tid = threadIdx.x;
+
     float val = 0.0f;
-    for (int k = 0; k < in_dim; k++)
+    for (int k = tid; k < in_dim; k += XA_THREADS)
         val += x[b * in_dim + k] * A[ri * in_dim + k];
-    xA[b * r + ri] = val;
+
+    partial[tid] = val;
+    __syncthreads();
+
+    #pragma unroll
+    for (int stride = XA_THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride)
+            partial[tid] += partial[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0)
+        xA[b * r + ri] = partial[0];
 }
 
 // y = x @ W.T + scale * xA @ B_mat.T  (fused, float4 tiled shared memory)
@@ -294,7 +311,8 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
     }
 
     // Kernel 1: xA = x @ A.T  [32, 8]
-    kernel_xA<<<B, r>>>(d_x, d_A, d_xA, B, in_dim, r);
+    dim3 grid_xA(B, r);
+    kernel_xA<<<grid_xA, XA_THREADS>>>(d_x, d_A, d_xA, B, in_dim, r);
 
     // Kernel 2: y = x @ W.T + scale * xA @ B.T (fused, tiled)
     dim3 block(THREADS_X, BLK_Y);
@@ -613,11 +631,31 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 ### Step 3. `kernel_xA` 개선
 
+상태:
+
+- 완료.
+- `grid=(B, r)`, `block=32` 구조로 바꿔 `xA[b, ri]` 하나를 32개 thread가 나눠 계산한다.
+
+결과:
+
+- worst-case가 `0.684 ms`에서 `0.579 ms`로 개선되었다.
+- 정확도는 `0.005859`에서 `0.007324`로 증가했지만, 과제 기준인 `0.01` 미만을 유지한다.
+
+### `XA_THREADS` 튜닝 결과
+
+| XA_THREADS | 최고 성능(ms) | 최악 성능(ms) | 평균 성능(ms) | 최대 절대 오차 |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 | 0.569 | 0.603 | 0.582 | 0.007324 |
+| 64 | 0.573 | 0.593 | 0.581 | 0.007202 |
+| 32 | 0.573 | 0.579 | 0.576 | 0.007324 |
+
+채점은 5회 중 최대 실행 시간을 기준으로 하므로, 최악 성능이 가장 낮은 `XA_THREADS=32`를 현재 baseline으로 선택한다.
+
 목표:
 
 - 작은 `xA` 커널의 비효율을 줄인다.
 
-계획:
+기존 계획:
 
 - 현재 `<<<B, r>>> = <<<32, 8>>>` 스타일 대신 warp 친화적인 reduction 구조를 시도한다.
 - `in_dim=4096` 축을 여러 thread가 나눠 처리하도록 바꾼다.
@@ -678,7 +716,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 향후 모든 실험은 아래 두 기준으로 현재 baseline과 비교한다.
 
-- 성능 기준: 최악 실행 시간 `0.684 ms`보다 빨라야 한다.
+- 성능 기준: 최악 실행 시간 `0.579 ms`보다 빨라야 한다.
 - 정확도 기준: 최대 절대 오차 `0.01` 미만을 유지해야 한다.
 
 추가로 기억할 점:
