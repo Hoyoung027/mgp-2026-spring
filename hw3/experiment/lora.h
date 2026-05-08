@@ -74,12 +74,13 @@ __global__ void kernel_xA(const float *x, const float *A, float *xA,
 //
 // K iterations: K/TILE_K = 32  (was 128),  __syncthreads: 64  (was 256)
 // LoRA fused at final store: r=8 dot product, no extra y round-trip
-__global__ void kernel_xWT_fused(const float *__restrict__ x,
-                                  const float *__restrict__ W,
-                                  const float *__restrict__ xA,
-                                  const float *__restrict__ B_mat,
-                                  float *y,
-                                  int B, int K, int N, int r, float scale) {
+__global__ __launch_bounds__(THREADS_PER_BLOCK, 4)
+void kernel_xWT_fused(const float *__restrict__ x,
+                      const float *__restrict__ W,
+                      const float *__restrict__ xA,
+                      const float *__restrict__ B_mat,
+                      float *y,
+                      int B, int K, int N, int r, float scale) {
     __shared__ float sX[BLK_Y][TILE_K];
     __shared__ float sW[BLK_X][TILE_K + 1];
     __shared__ float sXA[BLK_Y][8];

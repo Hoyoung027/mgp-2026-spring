@@ -871,7 +871,28 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 - 성능 기준: worst-case `0.570 ms`보다 빨라야 한다.
 - 정확도 기준: 최대 절대 오차 `0.01` 미만을 유지해야 한다.
 
-### Step 9. 실험 전용 브랜치
+### Step 9. `__launch_bounds__` 실험
+
+상태:
+
+- 현재 실험 후보.
+
+목표:
+
+- compiler에 block당 thread 수와 SM당 목표 block 수를 알려 register allocation과 occupancy 선택을 조정한다.
+
+계획:
+
+- `kernel_xWT_fused`에 `__launch_bounds__(THREADS_PER_BLOCK, 4)`를 붙인다.
+- 현재 baseline은 `THREADS_PER_BLOCK=128`이므로, compiler에 최대 128 threads/block과 최소 4 blocks/SM 목표를 힌트로 준다.
+- 정확도는 바뀌지 않아야 하며, 성능 기준은 현재 worst-case `0.570 ms`보다 빨라야 한다.
+
+주의:
+
+- register 사용량이 과하게 제한되면 spill이 생겨 오히려 느려질 수 있다.
+- `4`가 느리면 `2` 또는 `8`도 후보가 될 수 있지만, 우선은 가장 무난한 `4`만 비교한다.
+
+### Step 10. 실험 전용 브랜치
 
 후보:
 
