@@ -613,6 +613,21 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 ### Step 2. block shape 튜닝
 
+상태:
+
+- `BLK_X=32, BLK_Y=16, OUTS_PER_THREAD=2` 후보를 서버에서 측정했다.
+- 정확도는 통과했지만, 현재 baseline인 `BLK_Y=8`보다 worst-case가 느려 탈락시킨다.
+- 따라서 현재 baseline은 `BLK_X=32, BLK_Y=8, OUTS_PER_THREAD=2`를 유지한다.
+
+### `BLK_Y` 튜닝 결과
+
+| 설정 | 최고 성능(ms) | 최악 성능(ms) | 평균 성능(ms) | 최대 절대 오차 |
+| --- | ---: | ---: | ---: | ---: |
+| `BLK_Y=8` | 0.573 | 0.579 | 0.576 | 0.007324 |
+| `BLK_Y=16` | 0.596 | 0.609 | 0.603 | 0.007324 |
+
+`BLK_Y=16`은 `W` tile 재사용을 늘릴 수 있다는 기대가 있었지만, 실제 서버 측정에서는 block 크기 증가와 scheduling/occupancy 영향이 더 크게 작용한 것으로 보인다. 채점 기준인 worst-case 기준으로 `0.579 ms -> 0.609 ms`가 되어 약 `5.18%` 느려졌다.
+
 목표:
 
 - 현재 문제 크기 `B=32`, `N=4096`에 더 잘 맞는 block shape를 찾는다.
@@ -628,6 +643,12 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 기대 효과:
 
 - occupancy, scheduling, data reuse 사이 균형이 더 좋아질 수 있다.
+
+현재 판단:
+
+- `BLK_Y=8`이 현재까지 가장 안정적이다.
+- `BLK_Y=32`는 block 크기가 더 커지고 grid의 batch 방향 block 수가 더 줄어들기 때문에 우선순위를 낮춘다.
+- `d_xA` allocation 제거는 보류하고, 다음 큰 수정 후보는 `kernel_xA` 추가 경량화로 잡는다.
 
 ### Step 3. `kernel_xA` 개선
 
@@ -687,6 +708,11 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 ### Step 5. unroll / register 튜닝
 
+우선순위:
+
+- 낮음.
+- 현재 baseline보다 큰 개선 가능성은 block shape나 `xA` 경량화보다 작아 보인다.
+
 목표:
 
 - K 루프 안쪽 연산을 조금 더 다듬는다.
@@ -697,7 +723,56 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 - 부분 수동 unroll을 실험한다.
 - 성능이 나빠지면 register pressure 증가 여부를 의심한다.
 
-### Step 6. 실험 전용 브랜치
+### Step 6. `d_xA` allocation 제거
+
+상태:
+
+- 보류.
+- 채점기가 같은 shape의 다른 데이터만 사용할 가능성이 높지만, 혹시 다른 shape를 사용할 가능성을 고려해 현재 lazy allocation 방식을 유지한다.
+
+목표:
+
+- `lora()` 내부의 `cudaMalloc` 호출을 없애 측정 구간 안의 allocation overhead와 실행 흔들림을 줄인다.
+
+계획:
+
+- 문제 크기가 고정이라는 전제하에 `__device__ float g_xA[32 * 8]` 형태의 전역 scratch buffer를 실험한다.
+- `kernel_xA`와 `kernel_xWT_fused`가 이 전역 buffer를 사용하도록 바꾼다.
+- 정확도는 바뀌지 않아야 하며, 성능 기준은 현재 worst-case `0.579 ms`보다 빨라야 한다.
+
+주의:
+
+- 과제 입력 크기가 고정이라는 조건에 의존한다.
+- 만약 채점기가 다른 `B`나 `r`을 넣을 가능성이 있으면 현재 lazy allocation 방식이 더 안전하다.
+
+### Step 7. `kernel_xA` warp-shuffle 경량화
+
+상태:
+
+- 현재 실험 후보.
+- `d_xA` allocation 방식은 그대로 유지하고, `kernel_xA`의 reduction 방식만 바꾼다.
+
+목표:
+
+- shared memory reduction과 `__syncthreads()`를 줄여 작은 `xA` 커널의 latency를 더 낮춘다.
+
+계획:
+
+- `block=(32, 8)`, `grid=B` 구조로 한 block 안의 8개 warp가 rank 8개를 각각 계산하는 방식을 실험한다.
+- warp 내부 reduction은 `__shfl_down_sync`를 사용한다.
+- 현재 `XA_THREADS=32` baseline과 worst-case 기준으로 비교한다.
+
+기대 효과:
+
+- 기존 `grid=(B, r)`, `block=32` 방식의 256개 1-warp block을 `grid=B`, `block=(32, r)` 방식의 32개 block으로 줄인다.
+- shared memory `partial[]`와 reduction 단계의 `__syncthreads()`를 제거한다.
+
+검증 기준:
+
+- 성능 기준: worst-case `0.579 ms`보다 빨라야 한다.
+- 정확도 기준: 최대 절대 오차 `0.01` 미만을 유지해야 한다.
+
+### Step 8. 실험 전용 브랜치
 
 후보:
 
