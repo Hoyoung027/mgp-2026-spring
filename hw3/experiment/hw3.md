@@ -621,6 +621,12 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 ### Step 0. 현재 버전 보존
 
+상태:
+
+- 완료.
+- 현재 fallback baseline은 `BLK_X=16`, `BLK_Y=16`, `OUTS_PER_THREAD=2`, `TILE_K=128`, `XA_THREADS=32` 조합이다.
+- 기준 성능은 5회 반복 측정 기준 최고 `0.560 ms`, 최악 `0.570 ms`, 평균 `0.565 ms`, 최대 절대 오차 `0.007324`이다.
+
 목표:
 
 - 정확도와 성능이 모두 검증된 fallback 버전을 유지한다.
