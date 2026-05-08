@@ -723,7 +723,28 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 - 부분 수동 unroll을 실험한다.
 - 성능이 나빠지면 register pressure 증가 여부를 의심한다.
 
-### Step 6. `d_xA` allocation 제거
+### Step 6. `TILE_K=256` 실험
+
+상태:
+
+- 현재 실험 후보.
+
+목표:
+
+- 메인 커널의 K-loop iteration 수와 `__syncthreads()` 횟수를 줄인다.
+
+계획:
+
+- 현재 baseline의 `TILE_K=128`을 `TILE_K=256`으로 바꾼다.
+- `K/TILE_K`가 `32 -> 16`으로 줄어들고, K-loop 내부 `__syncthreads()` 횟수는 `64 -> 32`로 줄어든다.
+- 대신 shared memory 사용량은 약 `20KB -> 40KB`로 증가하므로 occupancy 저하 가능성을 확인한다.
+
+검증 기준:
+
+- 성능 기준: worst-case `0.579 ms`보다 빨라야 한다.
+- 정확도 기준: 최대 절대 오차 `0.01` 미만을 유지해야 한다.
+
+### Step 7. `d_xA` allocation 제거
 
 상태:
 
@@ -745,7 +766,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 - 과제 입력 크기가 고정이라는 조건에 의존한다.
 - 만약 채점기가 다른 `B`나 `r`을 넣을 가능성이 있으면 현재 lazy allocation 방식이 더 안전하다.
 
-### Step 7. `kernel_xA` warp-shuffle 경량화
+### Step 8. `kernel_xA` warp-shuffle 경량화
 
 상태:
 
@@ -792,7 +813,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 - 성능 기준: worst-case `0.579 ms`보다 빨라야 한다.
 - 정확도 기준: 최대 절대 오차 `0.01` 미만을 유지해야 한다.
 
-### Step 8. 실험 전용 브랜치
+### Step 9. 실험 전용 브랜치
 
 후보:
 

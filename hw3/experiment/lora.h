@@ -5,7 +5,7 @@
 // BLK_Y  : batch  (M) tile height
 // OUTS_PER_THREAD : outputs computed by one thread along N
 // THREADS_X : threadIdx.x width
-// TILE_K : K-step per iteration = BLK_X * 4  (float4: 1 load covers 4 K values)
+// TILE_K : K-step per iteration (float4: 1 load covers 4 K values)
 //
 // sX load : BLK_Y x TILE_K elements, SX_LOADS_PER_THREAD float4s per thread
 // sW load : BLK_X x TILE_K elements, SW_LOADS_PER_THREAD float4s per thread
@@ -19,7 +19,7 @@
 #define BLK_Y  8
 #define OUTS_PER_THREAD 2
 #define THREADS_X (BLK_X / OUTS_PER_THREAD)
-#define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
+#define TILE_K 256           // float4 loads, 16 K-iterations, 32 syncs
 #define THREADS_PER_BLOCK (THREADS_X * BLK_Y)
 #define K_FLOAT4S (TILE_K / 4)
 #define SX_FLOAT4S (BLK_Y * K_FLOAT4S)
@@ -67,12 +67,12 @@ __global__ void kernel_xA(const float *x, const float *A, float *xA,
 // y = x @ W.T + scale * xA @ B_mat.T  (fused, float4 tiled shared memory)
 // x: [B, K], W: [N, K], xA: [B, r], B_mat: [N, r] → y: [B, N]
 //
-// TILE_K=128: each K iteration loads 128 values via float4
+// TILE_K=256: each K iteration loads 256 values via float4
 //   sX[BLK_Y][TILE_K]   : loaded with SX_LOADS_PER_THREAD float4s/thread
 //   sW[BLK_X][TILE_K+1] : loaded with SW_LOADS_PER_THREAD float4s/thread
-//   +1 col padding: bank(sW[tx][tk]) = (tx*129+tk)%32, gcd(129,32)=1 → no conflict ✓
+//   +1 col padding: bank(sW[tx][tk]) = (tx*257+tk)%32, gcd(257,32)=1 → no conflict ✓
 //
-// K iterations: K/TILE_K = 32  (was 128),  __syncthreads: 64  (was 256)
+// K iterations: K/TILE_K = 16,  __syncthreads: 32
 // LoRA fused at final store: r=8 dot product, no extra y round-trip
 __global__ void kernel_xWT_fused(const float *__restrict__ x,
                                   const float *__restrict__ W,
