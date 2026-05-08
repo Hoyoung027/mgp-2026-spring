@@ -16,7 +16,7 @@
 //   K=4096 and N=4096 both divisible by TILE_K
 // ─────────────────────────────────────────────────────────────────────────────
 #define BLK_X  32
-#define BLK_Y  8
+#define BLK_Y  16
 #define OUTS_PER_THREAD 2
 #define THREADS_X (BLK_X / OUTS_PER_THREAD)
 #define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
