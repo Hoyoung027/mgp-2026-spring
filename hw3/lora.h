@@ -1,5 +1,20 @@
 #include "cuda_runtime.h"
 
+// ── Tunable dimensions ────────────────────────────────────────────────────────
+// BLK_X  : output (N) tile width
+// BLK_Y  : batch  (M) tile height
+// OUTS_PER_THREAD : outputs computed by one thread along N
+// THREADS_X : threadIdx.x width
+// TILE_K : K-step per iteration  (float4: 1 load covers 4 K values)
+//
+// sX load : BLK_Y x TILE_K elements, SX_LOADS_PER_THREAD float4s per thread
+// sW load : BLK_X x TILE_K elements, SW_LOADS_PER_THREAD float4s per thread
+//
+// Constraints (static_assert enforces):
+//   BLK_X % OUTS_PER_THREAD == 0
+//   THREADS_X * BLK_Y <= 1024
+//   K=4096 and N=4096 both divisible by TILE_K
+// ─────────────────────────────────────────────────────────────────────────────
 #define BLK_X  16
 #define BLK_Y  16
 #define OUTS_PER_THREAD 2
@@ -59,12 +74,13 @@ __global__ void kernel_xA(const float *x, const float *A, float *xA,
 //
 // K iterations: K/TILE_K = 32  (was 128),  __syncthreads: 64  (was 256)
 // LoRA fused at final store: r=8 dot product, no extra y round-trip
-__global__ void kernel_xWT_fused(const float *__restrict__ x,
-                                  const float *__restrict__ W,
-                                  const float *__restrict__ xA,
-                                  const float *__restrict__ B_mat,
-                                  float *y,
-                                  int B, int K, int N, int r, float scale) {
+__global__ __launch_bounds__(THREADS_PER_BLOCK, 4)
+void kernel_xWT_fused(const float *__restrict__ x,
+                      const float *__restrict__ W,
+                      const float *__restrict__ xA,
+                      const float *__restrict__ B_mat,
+                      float *y,
+                      int B, int K, int N, int r, float scale) {
     __shared__ float sX[BLK_Y][TILE_K];
     __shared__ float sW[BLK_X][TILE_K + 1];
     __shared__ float sXA[BLK_Y][8];
