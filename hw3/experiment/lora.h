@@ -5,7 +5,7 @@
 // BLK_Y  : batch  (M) tile height
 // OUTS_PER_THREAD : outputs computed by one thread along N
 // THREADS_X : threadIdx.x width
-// TILE_K : K-step per iteration = BLK_X * 4  (float4: 1 load covers 4 K values)
+// TILE_K : K-step per iteration  (float4: 1 load covers 4 K values)
 //
 // sX load : BLK_Y x TILE_K elements, SX_LOADS_PER_THREAD float4s per thread
 // sW load : BLK_X x TILE_K elements, SW_LOADS_PER_THREAD float4s per thread
@@ -15,11 +15,11 @@
 //   THREADS_X * BLK_Y <= 1024
 //   K=4096 and N=4096 both divisible by TILE_K
 // ─────────────────────────────────────────────────────────────────────────────
-#define BLK_X  32
-#define BLK_Y  8
+#define BLK_X  16
+#define BLK_Y  16
 #define OUTS_PER_THREAD 2
 #define THREADS_X (BLK_X / OUTS_PER_THREAD)
-#define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
+#define TILE_K 128           // float4 loads, 32 K-iterations, 64 syncs
 #define THREADS_PER_BLOCK (THREADS_X * BLK_Y)
 #define K_FLOAT4S (TILE_K / 4)
 #define SX_FLOAT4S (BLK_Y * K_FLOAT4S)

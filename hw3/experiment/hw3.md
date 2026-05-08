@@ -5,7 +5,7 @@
 현재 기준 구현 파일:
 [lora.h](/Users/hoyoung/Documents/yonsei/2026-1/멀티코어와GPU프로그래밍/mgp-2026-spring/hw3/experiment/lora.h)
 
-현재 baseline은 `Step 1: thread당 output 2개 계산`, `Step 4: LoRA tail의 B_mat vectorized load`, `Step 3: kernel_xA reduction`을 도입한 버전이다. 채점 서버 환경에서 아래 조건으로 측정했다.
+현재 baseline은 `Step 1: thread당 output 2개 계산`, `Step 4: LoRA tail의 B_mat vectorized load`, `Step 3: kernel_xA reduction`, `Step 2: block shape tuning`을 도입한 버전이다. 채점 서버 환경에서 아래 조건으로 측정했다.
 
 - GPU: NVIDIA GeForce RTX 3090
 - 빌드 옵션: `nvcc -std=c++11 -arch=sm_86`
@@ -15,26 +15,54 @@
 
 | 회차 | GPU | 실행 시간(ms) | 최대 절대 오차 |
 | --- | --- | ---: | ---: |
+| 1 | GPU 1 | 0.560 | 0.007324 |
+| 2 | GPU 1 | 0.560 | 0.007324 |
+| 3 | GPU 0 | 0.570 | 0.007324 |
+| 4 | GPU 1 | 0.566 | 0.007324 |
+| 5 | GPU 1 | 0.570 | 0.007324 |
+
+정리:
+
+- 최고 성능: `0.560 ms`
+- 최악 성능: `0.570 ms`
+- 평균 성능: `0.565 ms`
+- 정확도: `PASS` (`0.007324 < 0.01`)
+
+이 버전을 현재 제출 후보 baseline으로 사용한다. 설정은 `BLK_X=16`, `BLK_Y=16`, `OUTS_PER_THREAD=2`, `TILE_K=128`, `XA_THREADS=32`이다.
+
+## 2. 이전 Baseline과 비교
+
+직전 제출 후보 baseline은 `BLK_X=32`, `BLK_Y=8`, `OUTS_PER_THREAD=2`, `TILE_K=128`, `XA_THREADS=32`를 사용하던 버전이었다.
+
+### 직전 제출 후보 baseline 5회 반복 측정 결과
+
+| 회차 | GPU | 실행 시간(ms) | 최대 절대 오차 |
+| --- | --- | ---: | ---: |
 | 1 | GPU 0 | 0.576 | 0.007324 |
 | 2 | GPU 1 | 0.573 | 0.007324 |
 | 3 | GPU 1 | 0.579 | 0.007324 |
 | 4 | GPU 0 | 0.578 | 0.007324 |
 | 5 | GPU 0 | 0.575 | 0.007324 |
 
-정리:
+직전 제출 후보 baseline 정리:
 
 - 최고 성능: `0.573 ms`
 - 최악 성능: `0.579 ms`
 - 평균 성능: `0.576 ms`
 - 정확도: `PASS` (`0.007324 < 0.01`)
 
-이 버전을 현재 제출 후보 baseline으로 사용한다.
+현재 baseline은 직전 baseline 대비 아래만큼 개선되었다.
 
-## 2. 이전 Baseline과 비교
+- 최고 성능 기준: `0.573 ms -> 0.560 ms`
+- 최악 성능 기준: `0.579 ms -> 0.570 ms`
+- 평균 성능 기준: `0.576 ms -> 0.565 ms`
+- 정확도: 동일하게 `0.007324`
 
-직전 baseline은 `OUTS_PER_THREAD=2`와 LoRA tail의 `B_mat float4 load`까지 적용했지만, `kernel_xA`는 기존의 1-thread-1-output 방식으로 계산하던 버전이었다.
+채점은 5회 중 최대 실행 시간을 기준으로 하므로, 가장 중요한 비교값은 최악 성능이다. 현재 baseline은 직전 제출 후보 baseline 대비 worst-case 기준으로 약 `1.55%` 개선되었다.
 
-### 직전 baseline 5회 반복 측정 결과
+그보다 이전 baseline은 `OUTS_PER_THREAD=2`와 LoRA tail의 `B_mat float4 load`까지 적용했지만, `kernel_xA`는 기존의 1-thread-1-output 방식으로 계산하던 버전이었다.
+
+### 이전 `kernel_xA` baseline 5회 반복 측정 결과
 
 | 회차 | GPU | 실행 시간(ms) | 최대 절대 오차 |
 | --- | --- | ---: | ---: |
@@ -44,21 +72,21 @@
 | 4 | GPU 1 | 0.674 | 0.005859 |
 | 5 | GPU 0 | 0.676 | 0.005859 |
 
-직전 baseline 정리:
+이전 `kernel_xA` baseline 정리:
 
 - 최고 성능: `0.674 ms`
 - 최악 성능: `0.684 ms`
 - 평균 성능: `0.679 ms`
 - 정확도: `PASS` (`0.005859 < 0.01`)
 
-현재 baseline은 직전 baseline 대비 아래만큼 개선되었다.
+현재 baseline은 이전 `kernel_xA` baseline 대비 아래만큼 개선되었다.
 
-- 최고 성능 기준: `0.674 ms -> 0.573 ms`
-- 최악 성능 기준: `0.684 ms -> 0.579 ms`
-- 평균 성능 기준: `0.679 ms -> 0.576 ms`
+- 최고 성능 기준: `0.674 ms -> 0.560 ms`
+- 최악 성능 기준: `0.684 ms -> 0.570 ms`
+- 평균 성능 기준: `0.679 ms -> 0.565 ms`
 - 정확도: `0.005859 -> 0.007324`
 
-채점은 5회 중 최대 실행 시간을 기준으로 하므로, 가장 중요한 비교값은 최악 성능이다. 현재 baseline은 직전 baseline 대비 worst-case 기준으로 약 `15.35%` 개선되었다.
+현재 baseline은 이전 `kernel_xA` baseline 대비 worst-case 기준으로 약 `16.67%` 개선되었다.
 
 이전 baseline은 `float4 load`, fused LoRA add, `xA` shared cache, `d_xA` lazy allocation까지 적용된 1-thread-1-output 버전이었다.
 
@@ -81,12 +109,12 @@
 
 현재 baseline은 이전 baseline 대비 아래만큼 개선되었다.
 
-- 최고 성능 기준: `0.714 ms -> 0.573 ms`
-- 최악 성능 기준: `0.727 ms -> 0.579 ms`
-- 평균 성능 기준: `0.720 ms -> 0.576 ms`
+- 최고 성능 기준: `0.714 ms -> 0.560 ms`
+- 최악 성능 기준: `0.727 ms -> 0.570 ms`
+- 평균 성능 기준: `0.720 ms -> 0.565 ms`
 - 정확도: `0.005859 -> 0.007324`
 
-채점은 5회 중 최대 실행 시간을 기준으로 하므로, 가장 중요한 비교값은 최악 성능이다. 현재 baseline은 worst-case 기준으로 약 `20.36%` 개선되었다.
+채점은 5회 중 최대 실행 시간을 기준으로 하므로, 가장 중요한 비교값은 최악 성능이다. 현재 baseline은 worst-case 기준으로 약 `21.60%` 개선되었다.
 
 ## 3. 현재 버전에서 도입한 것
 
@@ -102,6 +130,7 @@
 6. `OUTS_PER_THREAD=2`를 도입하여 thread 하나가 output column 2개를 계산하도록 바꿨다.
 7. LoRA tail에서 `B_mat`를 scalar 8회 load 대신 `float4` 2회 load로 읽도록 바꿨다.
 8. `kernel_xA`를 block reduction 방식으로 바꿔 `xA[b, ri]` 하나를 32개 thread가 나눠 계산하도록 했다.
+9. block shape를 `BLK_X=32, BLK_Y=8`에서 `BLK_X=16, BLK_Y=16`으로 바꿔 같은 output tile 면적과 thread 수를 유지하면서 batch 방향 재사용을 늘렸다.
 
 `Step 1`의 핵심은 `sX[ty][tk]`를 한 번 읽어 여러 output에 재사용하는 것이다. 이를 위해 accumulator를 `val[OUTS_PER_THREAD]`로 두고, `sW[tx + j * THREADS_X][tk]`를 함께 사용한다.
 
@@ -114,6 +143,7 @@
 - thread당 output 2개를 계산해 같은 `sX` 값을 더 많이 재사용한다.
 - LoRA tail에서 `B_mat[o, 0..7]`를 `float4` 두 번으로 읽어 scalar load와 loop overhead를 줄였다.
 - `xA = x @ A.T`에서 4096 길이 dot product를 여러 thread가 나눠 계산해 작은 커널의 latency를 크게 줄였다.
+- `16x16` tile은 기존 `32x8` tile과 같은 256개 output을 128개 thread로 계산하면서, `W` tile을 더 많은 batch row에 재사용한다.
 - 5회 반복 측정에서 편차가 작다.
 
 채점은 5회 중 최대 실행 시간을 기준으로 하기 때문에, 최고 성능뿐 아니라 안정성도 중요하다.
@@ -130,7 +160,7 @@
 // BLK_Y  : batch  (M) tile height
 // OUTS_PER_THREAD : outputs computed by one thread along N
 // THREADS_X : threadIdx.x width
-// TILE_K : K-step per iteration = BLK_X * 4  (float4: 1 load covers 4 K values)
+// TILE_K : K-step per iteration  (float4: 1 load covers 4 K values)
 //
 // sX load : BLK_Y x TILE_K elements, SX_LOADS_PER_THREAD float4s per thread
 // sW load : BLK_X x TILE_K elements, SW_LOADS_PER_THREAD float4s per thread
@@ -140,11 +170,11 @@
 //   THREADS_X * BLK_Y <= 1024
 //   K=4096 and N=4096 both divisible by TILE_K
 // ─────────────────────────────────────────────────────────────────────────────
-#define BLK_X  32
-#define BLK_Y  8
+#define BLK_X  16
+#define BLK_Y  16
 #define OUTS_PER_THREAD 2
 #define THREADS_X (BLK_X / OUTS_PER_THREAD)
-#define TILE_K (BLK_X * 4)   // = 128; float4 loads, 32 K-iterations, 64 syncs
+#define TILE_K 128           // float4 loads, 32 K-iterations, 64 syncs
 #define THREADS_PER_BLOCK (THREADS_X * BLK_Y)
 #define K_FLOAT4S (TILE_K / 4)
 #define SX_FLOAT4S (BLK_Y * K_FLOAT4S)
@@ -615,18 +645,19 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 상태:
 
-- `BLK_X=32, BLK_Y=16, OUTS_PER_THREAD=2` 후보를 서버에서 측정했다.
-- 정확도는 통과했지만, 현재 baseline인 `BLK_Y=8`보다 worst-case가 느려 탈락시킨다.
-- 따라서 현재 baseline은 `BLK_X=32, BLK_Y=8, OUTS_PER_THREAD=2`를 유지한다.
+- `BLK_X=32, BLK_Y=16, OUTS_PER_THREAD=2` 후보는 정확도는 통과했지만, 기존 `BLK_X=32, BLK_Y=8` baseline보다 worst-case가 느려 탈락시켰다.
+- `BLK_X=16, BLK_Y=16, OUTS_PER_THREAD=2, TILE_K=128` 후보는 기존 제출 후보 baseline보다 worst-case가 빨라 채택한다.
+- 따라서 현재 baseline은 `BLK_X=16, BLK_Y=16, OUTS_PER_THREAD=2, TILE_K=128`을 사용한다.
 
 ### `BLK_Y` 튜닝 결과
 
 | 설정 | 최고 성능(ms) | 최악 성능(ms) | 평균 성능(ms) | 최대 절대 오차 |
 | --- | ---: | ---: | ---: | ---: |
-| `BLK_Y=8` | 0.573 | 0.579 | 0.576 | 0.007324 |
-| `BLK_Y=16` | 0.596 | 0.609 | 0.603 | 0.007324 |
+| `BLK_X=32, BLK_Y=8` | 0.573 | 0.579 | 0.576 | 0.007324 |
+| `BLK_X=32, BLK_Y=16` | 0.596 | 0.609 | 0.603 | 0.007324 |
+| `BLK_X=16, BLK_Y=16` | 0.560 | 0.570 | 0.565 | 0.007324 |
 
-`BLK_Y=16`은 `W` tile 재사용을 늘릴 수 있다는 기대가 있었지만, 실제 서버 측정에서는 block 크기 증가와 scheduling/occupancy 영향이 더 크게 작용한 것으로 보인다. 채점 기준인 worst-case 기준으로 `0.579 ms -> 0.609 ms`가 되어 약 `5.18%` 느려졌다.
+`BLK_X=32, BLK_Y=16`은 `W` tile 재사용을 늘릴 수 있다는 기대가 있었지만, 실제 서버 측정에서는 block 크기 증가와 scheduling/occupancy 영향이 더 크게 작용한 것으로 보인다. 반면 `BLK_X=16, BLK_Y=16`은 기존 `32x8`과 같은 256개 output tile과 128 threads/block을 유지하면서, batch 방향 reuse를 늘려 worst-case 기준 `0.579 ms -> 0.570 ms`로 약 `1.55%` 개선되었다.
 
 목표:
 
@@ -637,7 +668,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 - 아래 후보를 순서대로 비교한다.
   - `BLK_X=32, BLK_Y=8, OUTS_PER_THREAD=2`
   - `BLK_X=32, BLK_Y=4, OUTS_PER_THREAD=2`
-  - `BLK_X=16, BLK_Y=8, OUTS_PER_THREAD=2`
+  - `BLK_X=16, BLK_Y=16, OUTS_PER_THREAD=2`
   - `BLK_X=32, BLK_Y=8, OUTS_PER_THREAD=4`
 
 기대 효과:
@@ -646,9 +677,9 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 현재 판단:
 
-- `BLK_Y=8`이 현재까지 가장 안정적이다.
+- `BLK_X=16, BLK_Y=16`이 현재까지 가장 안정적이다.
 - `BLK_Y=32`는 block 크기가 더 커지고 grid의 batch 방향 block 수가 더 줄어들기 때문에 우선순위를 낮춘다.
-- `d_xA` allocation 제거는 보류하고, 다음 큰 수정 후보는 `kernel_xA` 추가 경량화로 잡는다.
+- `d_xA` allocation 제거는 보류하고, `kernel_xA` warp-shuffle 경량화와 `TILE_K=256`은 실험 결과 탈락했으므로 남은 후보는 우선순위가 낮다.
 
 ### Step 3. `kernel_xA` 개선
 
@@ -748,7 +779,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 - 평균 성능: `0.792 ms`
 - 정확도: `PASS` (`0.007324 < 0.01`)
 
-`TILE_K=256`은 K-loop iteration과 `__syncthreads()` 횟수를 줄였지만, shared memory 사용량 증가와 occupancy 저하 영향이 더 커진 것으로 보인다. 현재 baseline의 worst-case `0.579 ms`보다 크게 느리므로 탈락시킨다.
+`TILE_K=256`은 K-loop iteration과 `__syncthreads()` 횟수를 줄였지만, shared memory 사용량 증가와 occupancy 저하 영향이 더 커진 것으로 보인다. 현재 baseline의 worst-case `0.570 ms`보다 크게 느리므로 탈락시킨다.
 
 목표:
 
@@ -762,7 +793,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 검증 기준:
 
-- 성능 기준: worst-case `0.579 ms`보다 빨라야 한다.
+- 성능 기준: worst-case `0.570 ms`보다 빨라야 한다.
 - 정확도 기준: 최대 절대 오차 `0.01` 미만을 유지해야 한다.
 
 ### Step 7. `d_xA` allocation 제거
@@ -780,7 +811,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 - 문제 크기가 고정이라는 전제하에 `__device__ float g_xA[32 * 8]` 형태의 전역 scratch buffer를 실험한다.
 - `kernel_xA`와 `kernel_xWT_fused`가 이 전역 buffer를 사용하도록 바꾼다.
-- 정확도는 바뀌지 않아야 하며, 성능 기준은 현재 worst-case `0.579 ms`보다 빨라야 한다.
+- 정확도는 바뀌지 않아야 하며, 성능 기준은 현재 worst-case `0.570 ms`보다 빨라야 한다.
 
 주의:
 
@@ -812,7 +843,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 - 평균 성능: `0.585 ms`
 - 정확도: `PASS` (`0.007324 < 0.01`)
 
-현재 baseline의 worst-case `0.579 ms`보다 느리므로, 채점 기준상 기존 `XA_THREADS=32` shared-memory reduction 버전을 유지한다.
+당시 baseline의 worst-case `0.579 ms`보다 느렸고, 현재 baseline의 worst-case `0.570 ms`보다도 느리므로 채택하지 않는다.
 
 목표:
 
@@ -831,7 +862,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 검증 기준:
 
-- 성능 기준: worst-case `0.579 ms`보다 빨라야 한다.
+- 성능 기준: worst-case `0.570 ms`보다 빨라야 한다.
 - 정확도 기준: 최대 절대 오차 `0.01` 미만을 유지해야 한다.
 
 ### Step 9. 실험 전용 브랜치
@@ -853,7 +884,7 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 향후 모든 실험은 아래 두 기준으로 현재 baseline과 비교한다.
 
-- 성능 기준: 최악 실행 시간 `0.579 ms`보다 빨라야 한다.
+- 성능 기준: 최악 실행 시간 `0.570 ms`보다 빨라야 한다.
 - 정확도 기준: 최대 절대 오차 `0.01` 미만을 유지해야 한다.
 
 추가로 기억할 점:
