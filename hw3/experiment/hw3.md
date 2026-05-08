@@ -749,8 +749,28 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
 
 상태:
 
-- 현재 실험 후보.
-- `d_xA` allocation 방식은 그대로 유지하고, `kernel_xA`의 reduction 방식만 바꾼다.
+- 실험 완료.
+- 정확도는 통과했지만, 현재 baseline보다 worst-case가 느려 채택하지 않는다.
+- 현재 baseline은 기존 shared-memory reduction 방식의 `grid=(B, r)`, `block=32` 구조를 유지한다.
+
+### `kernel_xA` warp-shuffle 실험 결과
+
+| 회차 | GPU | 실행 시간(ms) | 최대 절대 오차 |
+| --- | --- | ---: | ---: |
+| 1 | GPU 1 | 0.578 | 0.007324 |
+| 2 | GPU 0 | 0.597 | 0.007324 |
+| 3 | GPU 0 | 0.578 | 0.007324 |
+| 4 | GPU 1 | 0.597 | 0.007324 |
+| 5 | GPU 0 | 0.576 | 0.007324 |
+
+정리:
+
+- 최고 성능: `0.576 ms`
+- 최악 성능: `0.597 ms`
+- 평균 성능: `0.585 ms`
+- 정확도: `PASS` (`0.007324 < 0.01`)
+
+현재 baseline의 worst-case `0.579 ms`보다 느리므로, 채점 기준상 기존 `XA_THREADS=32` shared-memory reduction 버전을 유지한다.
 
 목표:
 

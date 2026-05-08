@@ -35,29 +35,33 @@ static_assert(SX_FLOAT4S % THREADS_PER_BLOCK == 0,
               "sX float4 loads must divide evenly across block threads");
 static_assert(SW_FLOAT4S % THREADS_PER_BLOCK == 0,
               "sW float4 loads must divide evenly across block threads");
-static_assert(XA_THREADS == 32, "kernel_xA uses one warp per LoRA rank");
 
 // xA = x @ A.T
-// One block computes all xA[b, 0..r-1]; each warp owns one rank.
+// One block computes one xA[b, ri], splitting the 4096-wide dot product.
 __global__ void kernel_xA(const float *x, const float *A, float *xA,
                            int B, int in_dim, int r) {
-    const int b = blockIdx.x;
-    const int ri = threadIdx.y;
-    const int lane = threadIdx.x;
+    __shared__ float partial[XA_THREADS];
 
-    if (ri >= r)
-        return;
+    const int b = blockIdx.x;
+    const int ri = blockIdx.y;
+    const int tid = threadIdx.x;
 
     float val = 0.0f;
-    for (int k = lane; k < in_dim; k += XA_THREADS)
+    for (int k = tid; k < in_dim; k += XA_THREADS)
         val += x[b * in_dim + k] * A[ri * in_dim + k];
 
-    #pragma unroll
-    for (int offset = XA_THREADS / 2; offset > 0; offset >>= 1)
-        val += __shfl_down_sync(0xffffffffu, val, offset);
+    partial[tid] = val;
+    __syncthreads();
 
-    if (lane == 0)
-        xA[b * r + ri] = val;
+    #pragma unroll
+    for (int stride = XA_THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride)
+            partial[tid] += partial[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0)
+        xA[b * r + ri] = partial[0];
 }
 
 // y = x @ W.T + scale * xA @ B_mat.T  (fused, float4 tiled shared memory)
@@ -182,9 +186,8 @@ void lora(float *d_x, float *d_W, float *d_A, float *d_B, float *d_y,
     }
 
     // Kernel 1: xA = x @ A.T  [32, 8]
-    dim3 block_xA(XA_THREADS, r);
-    dim3 grid_xA(B);
-    kernel_xA<<<grid_xA, block_xA>>>(d_x, d_A, d_xA, B, in_dim, r);
+    dim3 grid_xA(B, r);
+    kernel_xA<<<grid_xA, XA_THREADS>>>(d_x, d_A, d_xA, B, in_dim, r);
 
     // Kernel 2: y = x @ W.T + scale * xA @ B.T (fused, tiled)
     dim3 block(THREADS_X, BLK_Y);
