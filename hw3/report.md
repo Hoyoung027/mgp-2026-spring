@@ -41,18 +41,55 @@ y = x @ W.T + scale * (x @ A.T @ B.T)
 - 각 thread가 `OUTS_PER_THREAD=2`개의 출력 column을 동시에 계산한다.
 - K 루프 마지막에 LoRA 항(`scale * xA @ B.T`)을 추가 global memory round-trip 없이 fused store로 처리한다.
 
-#### 1.3 주요 최적화 요약
+#### 1.3 주요 최적화 상세
+
+아래 표는 적용된 최적화를 요약한 것이다. 이후 단락에서 각 기법의 동작 원리를 구체적으로 설명한다.
 
 | 최적화 | 적용 위치 | 효과 |
 |--------|-----------|------|
-| float4 벡터화 로드 | sX, sW 로드 구간 | global load instruction 수 1/4 감소 |
-| TILE_K=128 | K-loop | sync 횟수 32회, cache 재사용 개선 |
-| OUTS_PER_THREAD=2 | 계산 루프 | sX 값 2회 재사용, ILP 향상 |
-| sW +1 padding | `sW[BLK_X][TILE_K+1]` | sW 접근 bank conflict 제거 |
-| sXA shared cache | LoRA tail | xA global load를 1회로 압축 |
-| B_mat float4 로드 | LoRA tail | r=8 scalar 8회 → float4 2회 |
-| kernel_xA block reduction | kernel_xA | 4096 dot product latency 대폭 감소 |
-| `__launch_bounds__(128, 4)` | kernel_xWT_fused | SM당 4 blocks 목표로 register allocation 조정 |
+| Tiled shared memory | sX, sW, TILE_K=128 | global load 횟수 BLK_Y/BLK_X 배 감소 |
+| float4 벡터화 로드 | sX, sW 로드 구간 | load instruction 수 1/4 감소 |
+| OUTS_PER_THREAD=2 | 계산 루프 | sX 재사용, 산술 집약도 2배 향상 |
+| sW +1 padding | `sW[BLK_X][TILE_K+1]` | sW bank conflict 제거 |
+| sXA shared cache | LoRA tail | xA global load를 블록당 1회로 압축 |
+| B_mat float4 로드 | LoRA tail | scalar 8회 → float4 2회 |
+| kernel_xA block reduction | kernel_xA | 직렬 4096 dot product를 32-병렬로 개선 |
+| `__launch_bounds__(128, 4)` | kernel_xWT_fused | register 할당 조정, worst-case 안정화 |
+
+**① Tiled Shared Memory (TILE_K=128)**
+
+W 행렬은 4096×4096×4 bytes = 64 MB다. tiling 없이 각 thread가 독립적으로 W의 한 row를 global memory에서 읽으면, 같은 블록 안의 BLK_Y=16개 batch row가 동일한 W tile을 16번 중복 로드한다. 반면 블록 내 모든 thread가 협력하여 `sW[BLK_X][TILE_K]`에 한 번만 올려두면 16개 batch row가 이를 공유하므로 global load 횟수가 1/16로 줄어든다. 마찬가지로 `sX[BLK_Y][TILE_K]`를 shared memory에 올려두면 BLK_X=16개의 output column이 공유한다. TILE_K=128은 한 번의 K-step 크기이며, K=4096을 32단계로 순회하면서 단계마다 sync 2회(load 후, compute 후)를 사용한다.
+
+**② float4 벡터화 로드**
+
+CUDA global memory는 32/64/128-byte 단위 transaction으로 전송된다. `float` 단위 스칼라 로드는 4 bytes × N개의 instruction을 발생시키지만, `float4`로 묶으면 16 bytes를 단일 128-bit instruction 하나로 처리한다. load instruction 수가 1/4로 줄고, memory controller coalescing 효율이 높아진다. 본 구현에서는 sX와 sW 로드 구간 모두에서 `float4`를 사용하며, linearized index를 `idx4`로 계산한 뒤 row/col로 분해하여 2D 배열에 저장한다.
+
+**③ OUTS_PER_THREAD=2 (출력 재사용)**
+
+기존 1-thread-1-output 방식에서 각 thread는 `sX[ty][tk]`를 한 번 읽어 `sW[tx][tk]` 하나에만 곱한다. OUTS_PER_THREAD=2로 바꾸면 동일한 `xv = sX[ty][tk]`를 두 개의 output에 재사용한다.
+
+```cpp
+float xv = sX[ty][tk];
+val[0] += xv * sW[tx][tk];             // output 0
+val[1] += xv * sW[tx + THREADS_X][tk]; // output 1
+```
+
+sX 로드 1회당 FMA가 2회 발생하므로 산술 집약도가 2배 높아지고, 레지스터에 `xv`를 유지하는 동안 두 번 활용한다.
+
+**④ kernel_xA Block Reduction**
+
+초기 버전은 `kernel_xA<<<B, r>>>`로, 1개 thread가 4096-long dot product를 홀로 직렬 계산했다. 개선 후에는 `grid=(B, r), block=32`로 바꿔 32개 thread가 4096/32=128개씩 분담한 뒤 shared memory tree reduction으로 합산한다.
+
+```
+직렬: 4096 FMA (1 thread)
+병렬: 128 FMA + 5단계 reduction = 133 steps (32 threads)
+```
+
+이 변경만으로 worst-case가 0.684 ms → 0.579 ms로 약 15% 단축됐다.
+
+**⑤ `__launch_bounds__(128, 4)`**
+
+CUDA 컴파일러는 register 사용량과 SM당 active block 수(occupancy) 사이의 trade-off를 자체적으로 추정한다. 힌트가 없으면 register를 많이 할당하여 IPC를 높이려 하지만, 그 결과 SM당 active block 수가 줄어 latency hiding이 약해진다. `__launch_bounds__(128, 4)`는 "블록당 최대 128 threads, SM당 최소 4 blocks"를 컴파일러에 명시하여 register 할당을 제한하고 occupancy를 확보하도록 유도한다. 이 힌트 적용 후 worst-case가 0.570 ms → 0.562 ms로 줄었고, 5회 측정의 편차도 감소했다.
 
 ---
 
@@ -64,12 +101,13 @@ y = x @ W.T + scale * (x @ A.T @ B.T)
 
 | 버전 | best (ms) | worst (ms) | avg (ms) | 최대 오차 |
 |------|----------:|-----------:|---------:|----------:|
-| 1-thread-1-output (초기) | 0.714 | 0.727 | 0.720 | 0.005859 |
-| + OUTS_PER_THREAD=2, float4, fused LoRA | 0.674 | 0.684 | 0.679 | 0.005859 |
+| Naive (global memory only, no shmem, 단일 커널) | 1.372 | 1.386 | 1.378 | 0.007324 |
+| Tiled shmem + float4 + 1-thread-1-output | 0.714 | 0.727 | 0.720 | 0.005859 |
+| + OUTS_PER_THREAD=2, fused LoRA store | 0.674 | 0.684 | 0.679 | 0.005859 |
 | + kernel_xA block reduction (BLK_X=32, BLK_Y=8) | 0.573 | 0.579 | 0.576 | 0.007324 |
 | + BLK_X=16, BLK_Y=16 + `__launch_bounds__` | **0.548** | **0.562** | **0.555** | 0.007324 |
 
-worst-case 기준으로 초기 대비 **약 22.7%** 개선되었다.
+worst-case 기준으로 naive 대비 **약 2.47배** 개선되었으며, tiled shared memory 도입 이후 단계적 최적화만으로도 **약 22.7%** 추가 개선되었다.
 
 #### 2.2 이론적 Roofline 분석
 
