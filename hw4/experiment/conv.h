@@ -1,183 +1,103 @@
 #include "cuda_runtime.h"
 
-// ============================================================
-// Naive im2col
-// ============================================================
-
-__global__ void im2col_kernel(
-    const float* x, int C, int H, int W,
-    int kH, int kW, int padH, int padW,
-    int strideH, int strideW, int dilH, int dilW,
-    int outH, int outW, float* out)
+__global__ void im2col_float4_kernel(const float* __restrict__ x,
+                                     int H, int W,
+                                     int kH, int kW,
+                                     int outH, int outW,
+                                     float* __restrict__ out)
 {
     int col_cols = outH * outW;
-    int tid      = blockIdx.x * blockDim.x + threadIdx.x;
-    int total    = C * kH * kW * col_cols;
+    int vec_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_vec = (kH * kW * col_cols) >> 2;
 
-    if (tid >= total) return;
+    if (vec_idx >= total_vec) return;
 
-    // col_idx varies fastest → coalesced writes & reads
-    int col_idx = tid % col_cols;
-    int row_idx = tid / col_cols;  // = c * kH * kW + kh * kW + kw
+    int elem = vec_idx << 2;
+    int row_idx = elem / col_cols;
+    int col_idx = elem - row_idx * col_cols;
+    int kh = row_idx / kW;
+    int kw = row_idx - kh * kW;
 
-    int oh  = col_idx / outW;
-    int ow  = col_idx % outW;
-    int kw  = row_idx % kW;
-    int kh  = (row_idx / kW) % kH;
-    int c   = row_idx / (kH * kW);
+    float4 vals;
 
-    int ih = oh * strideH - padH + kh * dilH;
-    int iw = ow * strideW - padW + kw  * dilW;
+    int pos0 = col_idx;
+    int oh0 = pos0 / outW;
+    int ow0 = pos0 - oh0 * outW;
+    vals.x = x[(oh0 + kh) * W + ow0 + kw];
 
-    float val = 0.0f;
-    if (ih >= 0 && ih < H && iw >= 0 && iw < W)
-        val = x[(c * H + ih) * W + iw];
+    int pos1 = col_idx + 1;
+    int oh1 = pos1 / outW;
+    int ow1 = pos1 - oh1 * outW;
+    vals.y = x[(oh1 + kh) * W + ow1 + kw];
 
-    out[row_idx * col_cols + col_idx] = val;
+    int pos2 = col_idx + 2;
+    int oh2 = pos2 / outW;
+    int ow2 = pos2 - oh2 * outW;
+    vals.z = x[(oh2 + kh) * W + ow2 + kw];
+
+    int pos3 = col_idx + 3;
+    int oh3 = pos3 / outW;
+    int ow3 = pos3 - oh3 * outW;
+    vals.w = x[(oh3 + kh) * W + ow3 + kw];
+
+    reinterpret_cast<float4*>(out)[vec_idx] = vals;
 }
 
 void launch_im2col(const float* x, int N, int C, int H, int W,
                    int kH, int kW, int padH, int padW, int strideH, int strideW,
                    int dilH, int dilW, float* out)
 {
-    int outH  = (H + 2 * padH - dilH * (kH - 1) - 1) / strideH + 1;
-    int outW  = (W + 2 * padW - dilW * (kW - 1) - 1) / strideW + 1;
-    int total = C * kH * kW * outH * outW;
+    int outH = (H + 2 * padH - dilH * (kH - 1) - 1) / strideH + 1;
+    int outW = (W + 2 * padW - dilW * (kW - 1) - 1) / strideW + 1;
+    int total_vec = (C * kH * kW * outH * outW) >> 2;
 
     int block = 256;
-    int grid  = (total + block - 1) / block;
+    int grid = (total_vec + block - 1) / block;
 
-    im2col_kernel<<<grid, block>>>(
-        x, C, H, W, kH, kW, padH, padW,
-        strideH, strideW, dilH, dilW, outH, outW, out);
+    im2col_float4_kernel<<<grid, block>>>(x, H, W, kH, kW, outH, outW, out);
 }
 
-// ============================================================
-// Naive Matmul: C = A * B,  A(M×K), B(K×N), C(M×N)
-// ============================================================
-
-__global__ void matmul_kernel(
-    const float* A, const float* B, float* C,
-    int M, int N, int K)
-{
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (row >= M || col >= N) return;
-
-    float sum = 0.0f;
-    for (int k = 0; k < K; k++)
-        sum += A[row * K + k] * B[k * N + col];
-
-    C[row * N + col] = sum;
-}
-
-__global__ void matmul_one_row_kernel(
-    const float* __restrict__ A, const float* __restrict__ B,
-    float* __restrict__ C, int N, int K)
+__global__ void matmul_one_row_kernel(const float* __restrict__ A,
+                                      const float* __restrict__ B,
+                                      float* __restrict__ C,
+                                      int N, int K)
 {
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (col >= N) return;
 
     float sum = 0.0f;
-    for (int k = 0; k < K; k++)
+    for (int k = 0; k < K; k++) {
         sum += A[k] * B[k * N + col];
+    }
 
     C[col] = sum;
 }
 
 void launch_matmul(const float* A, const float* B, float* C, int M, int N, int K)
 {
-    if (M == 1) {
-        int block = 256;
-        int grid = (N + block - 1) / block;
+    int block = 256;
+    int grid = (N + block - 1) / block;
 
-        matmul_one_row_kernel<<<grid, block>>>(A, B, C, N, K);
-        return;
-    }
-
-    dim3 block(32, 8);
-    dim3 grid((N + block.x - 1) / block.x,
-              (M + block.y - 1) / block.y);
-
-    matmul_kernel<<<grid, block>>>(A, B, C, M, N, K);
+    matmul_one_row_kernel<<<grid, block>>>(A, B, C, N, K);
 }
 
-// ============================================================
-// Naive Direct Conv2d
-// ============================================================
-
-__global__ void conv2d_direct_kernel(
-    const float* x, const float* w, float* y,
-    int N, int C, int H, int W,
-    int K, int kH, int kW,
-    int padH, int padW, int strideH, int strideW,
-    int dilH, int dilW, int outH, int outW)
+__global__ void conv2d_direct_kernel(const float* __restrict__ x,
+                                     const float* __restrict__ w,
+                                     float* __restrict__ y,
+                                     int H, int W,
+                                     int kH, int kW,
+                                     int outH, int outW)
 {
     int ow = blockIdx.x * blockDim.x + threadIdx.x;
     int oh = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (oh >= outH || ow >= outW) return;
 
-    // N=1, K=1, C=1 in graded input, but written generically
-    for (int n = 0; n < N; n++) {
-        for (int k = 0; k < K; k++) {
-            float val = 0.0f;
-            for (int c = 0; c < C; c++) {
-                for (int kh = 0; kh < kH; kh++) {
-                    for (int kw = 0; kw < kW; kw++) {
-                        int ih = oh * strideH - padH + kh * dilH;
-                        int iw = ow * strideW - padW + kw * dilW;
-                        if (ih >= 0 && ih < H && iw >= 0 && iw < W)
-                            val += x[((n * C + c) * H + ih) * W + iw]
-                                 * w[((k * C + c) * kH + kh) * kW + kw];
-                    }
-                }
-            }
-            y[((n * K + k) * outH + oh) * outW + ow] = val;
-        }
-    }
-}
-
-template<int R>
-__global__ void conv2d_direct_tiled_kernel(
-    const float* __restrict__ x,
-    const float* __restrict__ w,
-    float* __restrict__ y,
-    int H, int W, int outH, int outW)
-{
-    extern __shared__ float tile[];
-
-    int tileW = blockDim.x + R - 1;
-    int tileH = blockDim.y + R - 1;
-    int baseX = blockIdx.x * blockDim.x;
-    int baseY = blockIdx.y * blockDim.y;
-    int tid = threadIdx.y * blockDim.x + threadIdx.x;
-    int threads = blockDim.x * blockDim.y;
-
-    for (int i = tid; i < tileW * tileH; i += threads) {
-        int ly = i / tileW;
-        int lx = i - ly * tileW;
-        int ix = baseX + lx;
-        int iy = baseY + ly;
-
-        tile[i] = (iy < H && ix < W) ? x[iy * W + ix] : 0.0f;
-    }
-    __syncthreads();
-
-    int ow = baseX + threadIdx.x;
-    int oh = baseY + threadIdx.y;
-
-    if (oh >= outH || ow >= outW) return;
-
     float sum = 0.0f;
-#pragma unroll
-    for (int kh = 0; kh < R; kh++) {
-#pragma unroll
-        for (int kw = 0; kw < R; kw++) {
-            sum += tile[(threadIdx.y + kh) * tileW + threadIdx.x + kw]
-                 * w[kh * R + kw];
+    for (int kh = 0; kh < kH; kh++) {
+        for (int kw = 0; kw < kW; kw++) {
+            sum += x[(oh + kh) * W + ow + kw] * w[kh * kW + kw];
         }
     }
 
@@ -197,25 +117,5 @@ void launch_conv2d_direct(const float* x, const float* w, float* y,
     dim3 grid((outW + block.x - 1) / block.x,
               (outH + block.y - 1) / block.y);
 
-    if (N == 1 && C == 1 && K == 1 &&
-        padH == 0 && padW == 0 &&
-        strideH == 1 && strideW == 1 &&
-        dilH == 1 && dilW == 1 && kH == kW) {
-        if (kH == 3) {
-            size_t shmem = (block.x + 2) * (block.y + 2) * sizeof(float);
-            conv2d_direct_tiled_kernel<3><<<grid, block, shmem>>>(
-                x, w, y, H, W, outH, outW);
-            return;
-        }
-        if (kH == 7) {
-            size_t shmem = (block.x + 6) * (block.y + 6) * sizeof(float);
-            conv2d_direct_tiled_kernel<7><<<grid, block, shmem>>>(
-                x, w, y, H, W, outH, outW);
-            return;
-        }
-    }
-
-    conv2d_direct_kernel<<<grid, block>>>(
-        x, w, y, N, C, H, W, K, kH, kW,
-        padH, padW, strideH, strideW, dilH, dilW, outH, outW);
+    conv2d_direct_kernel<<<grid, block>>>(x, w, y, H, W, kH, kW, outH, outW);
 }
