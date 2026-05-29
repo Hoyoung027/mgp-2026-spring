@@ -50,6 +50,14 @@ output(K × outH*outW) = filter(K × C*kH*kW) × col(C*kH*kW × outH*outW)
 
 **float4 Vectorization**: im2col의 경우 연산보다 메모리 대역폭이 병목이므로, `float4` 타입을 이용해 thread 하나가 4개의 원소를 묶어 처리하면 메모리 트랜잭션 수를 줄여 효율을 높일 수 있다.
 
+### 1.3 현재 과제 조건에 대한 구현 및 성능 예상
+
+제공된 driver에서 batch size는 1이고, 입력은 단일 채널 2048×2048 이미지이며 필터는 3×3과 7×7 두 가지이다. 이 경우 direct convolution은 출력 원소 하나를 thread 하나가 담당하는 단순한 mapping만으로도 충분한 병렬성을 확보할 수 있다. 출력 원소 수가 약 4백만 개이므로 GPU 전체를 활용하기에 충분하고, 각 thread가 수행하는 연산량은 3×3에서 9번, 7×7에서 49번의 multiply-add로 작다.
+
+im2col 구현에서는 col 행렬의 column 방향을 연속 메모리로 배치하는 것이 중요하다. 특히 `outH × outW` 방향이 연속되므로, thread 하나가 연속된 4개 원소를 처리하는 `float4` vectorization을 적용하면 store instruction 수를 줄일 수 있다. GEMM의 경우 출력 채널 `K`가 1이라면 결과 행렬의 row 수가 1이 되므로, 일반적인 2D tiled GEMM보다 row 하나에 특화한 1D kernel이 더 단순하고 효율적일 수 있다.
+
+성능 면에서는 direct convolution과 im2col+GEMM 모두 제한 시간 안에 들어올 것으로 예상된다. 다만 일반적인 CNN에서는 im2col+GEMM이 유리한 경우가 많기 때문에, 적절히 최적화한 GEMM을 사용하면 im2col+GEMM 방식도 direct convolution과 비슷하거나 더 빠른 성능을 낼 가능성이 있다. 특히 7×7처럼 필터가 커질수록 GEMM으로 변환했을 때 얻는 계산 구조의 장점이 커질 수 있다.
+
 ---
 
 ## Part 2. 학생 평가
@@ -63,16 +71,17 @@ AI가 설명한 이론적 내용은 대체로 정확하다.
 - Direct convolution의 thread 매핑 방식과 shared memory tiling의 원리는 실제 구현과 일치한다. "인접한 출력 위치가 입력을 중복으로 읽는다"는 문제 설명이 정확하며, 이것이 tiling의 동기이다.
 - im2col 변환의 수식과 col 행렬 크기 `(C × kH × kW) × (outH × outW)`도 맞다. main.cu에서 `col_rows = C * kH * kW`, `col_cols = outH * outW`로 정의한 것과 일치한다.
 - float4 vectorization이 메모리 트랜잭션을 줄인다는 설명도 정확하다. 실제로 적용하여 20% 수준의 im2col 시간 감소를 확인했다.
+- 제공된 driver에서 convolution의 출력 채널 수가 1일 때 GEMM 결과 행렬의 row 수가 `M=1`이 되므로, 이를 1D kernel로 특화할 수 있다는 지적도 유효했다. 실제로 3×3 GEMM에서는 naive 2D GEMM보다 약 21% 빠른 결과가 나왔다.
 
 ---
 
 ### 2.2 AI 내용 중 틀리거나 누락된 부분
 
-AI의 설명은 일반적인 CNN (C=512, K=256 수준)을 가정하고 있어, 이번 과제의 구체적인 조건에는 맞지 않는 부분이 있다.
+AI의 설명은 입력 채널 C와 출력 채널 K가 충분히 큰 일반적인 CNN convolution을 기준으로 한 설명에 가깝다. 따라서 제공된 `main.cu`의 고정 설정에서 관찰된 병목을 충분히 예측하지 못한 부분이 있다.
 
 **"im2col+GEMM이 일반적으로 더 빠르다"는 전제의 한계**
 
-AI는 im2col+GEMM이 BLAS 활용으로 유리하다고 설명했다. 그러나 이번 과제의 입력 조건은 `N=1, C=1, K=1`로 고정되어 있다. 이 경우 im2col+GEMM의 비효율이 두드러진다.
+AI는 im2col+GEMM이 BLAS 활용으로 유리하다고 설명했고, 7×7처럼 필터가 커질수록 GEMM 방식의 장점이 커질 수 있다고 예측했다. 그러나 제공된 `main.cu`에서는 `N=1, C=1, K=1`로 설정되어 있고, 이 조건에서는 im2col+GEMM의 비효율이 두드러진다.
 
 im2col 단계에서 생성되는 중간 행렬의 크기는 다음과 같이 계산된다.
 
@@ -99,11 +108,27 @@ col 행렬의 크기 = `(C × kH × kW) × (outH × outW)` 이며, outH = H - kH
 | GEMM | 0.239 ms | 0.977 ms |
 | im2col + GEMM 합계 | 0.668 ms | 2.932 ms |
 
-direct conv가 im2col+GEMM보다 3×3에서 약 3배, 7×7에서 약 14배 빠르다. AI가 "im2col+GEMM이 더 빠를 수 있다"고 설명한 것과 정반대의 결과다.
+direct conv가 im2col+GEMM보다 3×3에서 약 3배, 7×7에서 약 14배 빠르다. AI의 예상과 달리, 필터가 7×7로 커졌을 때도 GEMM 구조의 이점보다 im2col 중간 버퍼를 만들고 다시 읽는 비용이 훨씬 크게 작용했다.
+
+최적화 효과를 확인하기 위해 naive im2col 및 naive 2D GEMM을 사용한 baseline도 측정했다. 평균 시간은 다음과 같다.
+
+| 구현 | 3×3 im2col | 3×3 GEMM | 3×3 im2col+GEMM | 7×7 im2col | 7×7 GEMM | 7×7 im2col+GEMM |
+|---|---:|---:|---:|---:|---:|---:|
+| Naive baseline | 0.536 ms | 0.304 ms | 0.841 ms | 2.486 ms | 1.011 ms | 3.498 ms |
+| Optimized | 0.429 ms | 0.239 ms | 0.668 ms | 1.956 ms | 0.977 ms | 2.932 ms |
+
+이 표에서 볼 수 있듯이 `float4` im2col과 M=1 특화 GEMM은 naive baseline보다 빠르다. 그러나 최적화 후에도 im2col+GEMM 전체 시간은 direct convolution보다 크다. 따라서 문제는 단순히 커널 최적화가 부족한 것이 아니라, im2col 중간 버퍼를 materialize하는 알고리즘적 비용이 크다는 점에 있다.
 
 **M=1 특화 최적화의 효과 차이**
 
-AI는 GEMM tiling을 일반적으로 설명했지만, `K=1` (출력 채널 1개)이면 GEMM의 M=1이 되어 2D tiling의 이점이 사라진다. 이 경우 1D kernel로 단순화했을 때 오히려 더 효율적이다. 실측에서 M=1 특화 커널은 3×3 GEMM에서 21% 개선을 보였으나, 7×7에서는 3%에 그쳤다. 이는 7×7에서 K=49인 reduction dimension이 크지 않아 메모리 대역폭이 여전히 병목이기 때문으로 해석된다.
+AI는 GEMM tiling을 일반적으로 설명했지만, convolution의 출력 채널 수가 1이면 GEMM 결과 행렬의 row 수가 `M=1`이 되어 2D tiling의 이점이 작아진다. 이 경우 1D kernel로 단순화했을 때 오히려 더 효율적이라고 보인다. 이 성능 향상은 naive 2D GEMM 평균 시간과 M=1 특화 GEMM 평균 시간을 비교하여 계산했다.
+
+| 필터 | naive GEMM avg | M=1 GEMM avg | 개선율 |
+|---|---:|---:|---:|
+| 3×3 | 0.304 ms | 0.239 ms | 약 21% |
+| 7×7 | 1.011 ms | 0.977 ms | 약 3% |
+
+개선율은 `(naive time - optimized time) / naive time`으로 계산했다. 3×3에서는 기존 2D block에서 실제로 필요한 row가 하나뿐이라 낭비되는 thread가 많았고, 1D kernel이 이 낭비를 줄였다. 반면 7×7에서는 reduction dimension이 `C×kH×kW = 49`로 더 커져 각 output column이 수행해야 하는 dot product 자체의 비용이 커졌기 때문에, row 방향 thread 낭비를 줄이는 효과가 상대적으로 작게 나타났다.
 
 ---
 
