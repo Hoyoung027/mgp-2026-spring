@@ -331,9 +331,9 @@ void reduce_optimize(const int* const g_idata, int* const g_odata, const int* co
     (void)g_idata;
     (void)g_odata;
 
-    int partial_count = launch_reduce6(d_idata, d_odata, n);
+    int partial_count = launch_reduce5(d_idata, d_odata, n);
 
     while (partial_count > 1) {
-        partial_count = launch_reduce6(d_odata, d_odata, partial_count);
+        partial_count = launch_reduce5(d_odata, d_odata, partial_count);
     }
 }
