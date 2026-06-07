@@ -69,6 +69,60 @@ def _conv2d_kernel(
     tl.store(out_ptr + out_offsets, acc, mask=out_mask)
 
 
+@triton.jit
+def _conv2d_1x1_kernel(
+    input_ptr,
+    weight_ptr,
+    out_ptr,
+    M: tl.constexpr,
+    K: tl.constexpr,
+    C: tl.constexpr,
+    H: tl.constexpr,
+    W: tl.constexpr,
+    P: tl.constexpr,
+    Q: tl.constexpr,
+    STRIDE_H: tl.constexpr,
+    STRIDE_W: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_k = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_out_k = pid_k * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    q = offs_m % Q
+    p = (offs_m // Q) % P
+    n = offs_m // (P * Q)
+    ih = p * STRIDE_H
+    iw = q * STRIDE_W
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    offs_c = tl.arange(0, BLOCK_K)
+    for c0 in range(0, C, BLOCK_K):
+        c = c0 + offs_c
+        x_offsets = ((n[:, None] * C + c[None, :]) * H + ih[:, None]) * W + iw[:, None]
+        w_offsets = offs_out_k[None, :] * C + c[:, None]
+
+        x = tl.load(
+            input_ptr + x_offsets,
+            mask=(offs_m[:, None] < M) & (c[None, :] < C),
+            other=0.0,
+        )
+        w = tl.load(
+            weight_ptr + w_offsets,
+            mask=(offs_out_k[None, :] < K) & (c[:, None] < C),
+            other=0.0,
+        )
+        acc += tl.dot(x, w)
+
+    out_offsets = ((n[:, None] * K + offs_out_k[None, :]) * P + p[:, None]) * Q + q[:, None]
+    out_mask = (offs_m[:, None] < M) & (offs_out_k[None, :] < K)
+    tl.store(out_ptr + out_offsets, acc, mask=out_mask)
+
+
 def triton_conv2d(input, weight, bias, stride, padding, dilation):
     """
     Perform a 2D convolution operation using Triton.
@@ -100,6 +154,27 @@ def triton_conv2d(input, weight, bias, stride, padding, dilation):
 
     out = zeros((n, k, p, q), device=input.device, dtype=input.dtype)
     m = n * p * q
+
+    if r == 1 and s == 1 and pad_h == 0 and pad_w == 0 and dil_h == 1 and dil_w == 1:
+        grid = (triton.cdiv(m, 32), triton.cdiv(k, 64))
+        _conv2d_1x1_kernel[grid](
+            input,
+            weight,
+            out,
+            m,
+            k,
+            c,
+            h,
+            w,
+            p,
+            q,
+            stride_h,
+            stride_w,
+            BLOCK_M=32,
+            BLOCK_N=64,
+            BLOCK_K=64,
+        )
+        return out
 
     grid = (triton.cdiv(m, 32), triton.cdiv(k, 32))
     _conv2d_kernel[grid](
