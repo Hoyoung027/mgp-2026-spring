@@ -123,6 +123,6 @@ def triton_conv2d(input, weight, bias, stride, padding, dilation):
         dil_w,
         BLOCK_M=32,
         BLOCK_N=32,
-        BLOCK_K=64,
+        BLOCK_K=32,
     )
     return out
