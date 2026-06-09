@@ -1,6 +1,6 @@
 import triton
 import triton.language as tl
-from mgp import empty, empty_like
+from mgp import empty
 
 
 
@@ -27,3 +27,53 @@ def triton_bn2d(
     Returns:
         Tensor: The normalized and optionally activated output tensor of the same shape as input.
     """
+    out = empty(input.shape, device=input.device, dtype=input.dtype)
+    n, c, h, w = input.shape
+    total = input.numel()
+
+    def grid(meta):
+        return (triton.cdiv(total, meta["BLOCK_SIZE"]),)
+
+    _bn2d_kernel[grid](
+        input,
+        out,
+        weight,
+        bias,
+        running_mean,
+        running_var,
+        total,
+        c,
+        h * w,
+        eps,
+        BLOCK_SIZE=1024,
+    )
+    return out
+
+
+@triton.jit
+def _bn2d_kernel(
+    x_ptr,
+    out_ptr,
+    weight_ptr,
+    bias_ptr,
+    mean_ptr,
+    var_ptr,
+    total: tl.constexpr,
+    channels: tl.constexpr,
+    spatial: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < total
+    c = (offsets // spatial) % channels
+
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    weight = tl.load(weight_ptr + c, mask=mask, other=0.0)
+    bias = tl.load(bias_ptr + c, mask=mask, other=0.0)
+    mean = tl.load(mean_ptr + c, mask=mask, other=0.0)
+    var = tl.load(var_ptr + c, mask=mask, other=1.0)
+
+    y = (x - mean) * tl.rsqrt(var + eps) * weight + bias
+    tl.store(out_ptr + offsets, y, mask=mask)
