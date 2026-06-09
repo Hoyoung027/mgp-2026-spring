@@ -3,6 +3,50 @@ import triton.language as tl
 from mgp import empty
 
 
+@triton.jit
+def _linear_kernel(
+    a_ptr,
+    b_ptr,
+    bias_ptr,
+    out_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        k = k0 + offs_k
+        a = tl.load(
+            a_ptr + offs_m[:, None] * K + k[None, :],
+            mask=(offs_m[:, None] < M) & (k[None, :] < K),
+            other=0.0,
+        )
+        b = tl.load(
+            b_ptr + k[:, None] * N + offs_n[None, :],
+            mask=(k[:, None] < K) & (offs_n[None, :] < N),
+            other=0.0,
+        )
+        acc += tl.dot(a, b)
+
+    bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0).to(tl.float32)
+    acc += bias[None, :]
+    tl.store(
+        out_ptr + offs_m[:, None] * N + offs_n[None, :],
+        acc,
+        mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
+    )
+
+
 def triton_linear(a, b, bias):
     """
     Perform a linear transformation using Triton.
@@ -23,7 +67,6 @@ def triton_linear(a, b, bias):
     m, k = a.shape
     _, n = b.shape
     out = empty((m, n), device=a.device, dtype=a.dtype)
-
     grid = (triton.cdiv(m, 16), triton.cdiv(n, 16))
     _linear_kernel[grid](
         a,
@@ -33,64 +76,8 @@ def triton_linear(a, b, bias):
         m,
         n,
         k,
-        a.stride(0),
-        a.stride(1),
-        b.stride(0),
-        b.stride(1),
-        out.stride(0),
-        out.stride(1),
         BLOCK_M=16,
         BLOCK_N=16,
-        BLOCK_K=64,
+        BLOCK_K=32,
     )
     return out
-
-
-@triton.jit
-def _linear_kernel(
-    a_ptr,
-    b_ptr,
-    bias_ptr,
-    out_ptr,
-    m: tl.constexpr,
-    n: tl.constexpr,
-    k: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
-    stride_bn: tl.constexpr,
-    stride_om: tl.constexpr,
-    stride_on: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-
-    acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
-    for k0 in range(0, k, BLOCK_K):
-        kk = k0 + offs_k
-        a_vals = tl.load(
-            a_ptr + offs_m[:, None] * stride_am + kk[None, :] * stride_ak,
-            mask=(offs_m[:, None] < m) & (kk[None, :] < k),
-            other=0.0,
-        )
-        b_vals = tl.load(
-            b_ptr + kk[:, None] * stride_bk + offs_n[None, :] * stride_bn,
-            mask=(kk[:, None] < k) & (offs_n[None, :] < n),
-            other=0.0,
-        )
-        acc += tl.dot(a_vals, b_vals)
-
-    bias = tl.load(bias_ptr + offs_n, mask=offs_n < n, other=0.0)
-    acc += bias[None, :]
-    tl.store(
-        out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
-        acc,
-        mask=(offs_m[:, None] < m) & (offs_n[None, :] < n),
-    )

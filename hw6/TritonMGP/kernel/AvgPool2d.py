@@ -3,11 +3,52 @@ import triton.language as tl
 from mgp import empty
 
 
+@triton.jit
+def _avgpool2d_kernel(
+    x_ptr,
+    out_ptr,
+    num_elements,
+    C: tl.constexpr,
+    H: tl.constexpr,
+    W: tl.constexpr,
+    P: tl.constexpr,
+    Q: tl.constexpr,
+    KH: tl.constexpr,
+    KW: tl.constexpr,
+    SH: tl.constexpr,
+    SW: tl.constexpr,
+    PH: tl.constexpr,
+    PW: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_elements
+
+    q = offsets % Q
+    p = (offsets // Q) % P
+    c = (offsets // (P * Q)) % C
+    n = offsets // (C * P * Q)
+
+    acc = tl.zeros((BLOCK_SIZE,), tl.float32)
+    for kh in range(0, KH):
+        ih = p * SH + kh - PH
+        h_mask = (ih >= 0) & (ih < H)
+        for kw in range(0, KW):
+            iw = q * SW + kw - PW
+            valid = mask & h_mask & (iw >= 0) & (iw < W)
+            x_offsets = ((n * C + c) * H + ih) * W + iw
+            acc += tl.load(x_ptr + x_offsets, mask=valid, other=0.0).to(tl.float32)
+
+    acc = acc / (KH * KW)
+    tl.store(out_ptr + offsets, acc, mask=mask)
+
+
 def triton_avgpool2d(
     x,
-    pool_size=(7, 7),
+    kernel_size=(7, 7),
     stride=(1, 1),
     padding=(0, 0),
+    pool_size=None,
 ):
     """
     Applies a 2D average pooling over an input signal composed of several input planes.
@@ -19,27 +60,31 @@ def triton_avgpool2d(
     Returns:
         torch.Tensor: Output tensor after applying average pooling, with shape [N, C, 1, 1].
     """
+    if pool_size is not None:
+        kernel_size = pool_size
+
     n, c, h, w = x.shape
-    kh, kw = pool_size
+    kh, kw = kernel_size
     sh, sw = stride
     ph, pw = padding
-    out_h = (h + 2 * ph - kh) // sh + 1
-    out_w = (w + 2 * pw - kw) // sw + 1
-    out = empty((n, c, out_h, out_w), device=x.device, dtype=x.dtype)
-    total = out.numel()
+    p = (h + 2 * ph - kh) // sh + 1
+    q = (w + 2 * pw - kw) // sw + 1
+
+    out = empty((n, c, p, q), device=x.device, dtype=x.dtype)
+    n_elements = out.numel()
 
     def grid(meta):
-        return (triton.cdiv(total, meta["BLOCK_SIZE"]),)
+        return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
     _avgpool2d_kernel[grid](
         x,
         out,
-        total,
+        n_elements,
         c,
         h,
         w,
-        out_h,
-        out_w,
+        p,
+        q,
         kh,
         kw,
         sh,
@@ -49,46 +94,3 @@ def triton_avgpool2d(
         BLOCK_SIZE=256,
     )
     return out
-
-
-@triton.jit
-def _avgpool2d_kernel(
-    x_ptr,
-    out_ptr,
-    total: tl.constexpr,
-    channels: tl.constexpr,
-    in_h: tl.constexpr,
-    in_w: tl.constexpr,
-    out_h: tl.constexpr,
-    out_w: tl.constexpr,
-    kernel_h: tl.constexpr,
-    kernel_w: tl.constexpr,
-    stride_h: tl.constexpr,
-    stride_w: tl.constexpr,
-    pad_h: tl.constexpr,
-    pad_w: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < total
-
-    ow = offsets % out_w
-    oh = (offsets // out_w) % out_h
-    ch = (offsets // (out_h * out_w)) % channels
-    bn = offsets // (channels * out_h * out_w)
-
-    acc = tl.zeros((BLOCK_SIZE,), tl.float32)
-    count = tl.zeros((BLOCK_SIZE,), tl.float32)
-    for rr in range(kernel_h):
-        ih = oh * stride_h + rr - pad_h
-        valid_h = (ih >= 0) & (ih < in_h)
-        for ss in range(kernel_w):
-            iw = ow * stride_w + ss - pad_w
-            valid = mask & valid_h & (iw >= 0) & (iw < in_w)
-            x_idx = ((bn * channels + ch) * in_h + ih) * in_w + iw
-            val = tl.load(x_ptr + x_idx, mask=valid, other=0.0)
-            acc += val
-            count += tl.where(valid, 1.0, 0.0)
-
-    tl.store(out_ptr + offsets, acc / count, mask=mask)

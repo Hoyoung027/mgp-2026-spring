@@ -3,6 +3,35 @@ import triton.language as tl
 from mgp import empty
 
 
+@triton.jit
+def _bn2d_kernel(
+    input_ptr,
+    weight_ptr,
+    bias_ptr,
+    mean_ptr,
+    var_ptr,
+    out_ptr,
+    num_elements,
+    C: tl.constexpr,
+    H: tl.constexpr,
+    W: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_elements
+    channel = (offsets // (H * W)) % C
+
+    x = tl.load(input_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    gamma = tl.load(weight_ptr + channel, mask=mask, other=1.0).to(tl.float32)
+    beta = tl.load(bias_ptr + channel, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.load(mean_ptr + channel, mask=mask, other=0.0).to(tl.float32)
+    var = tl.load(var_ptr + channel, mask=mask, other=1.0).to(tl.float32)
+
+    y = (x - mean) * tl.rsqrt(var + eps) * gamma + beta
+    tl.store(out_ptr + offsets, y, mask=mask)
+
+
 
 
 def triton_bn2d(
@@ -28,52 +57,24 @@ def triton_bn2d(
         Tensor: The normalized and optionally activated output tensor of the same shape as input.
     """
     out = empty(input.shape, device=input.device, dtype=input.dtype)
-    n, c, h, w = input.shape
-    total = input.numel()
+    n_elements = input.numel()
+    _, c, h, w = input.shape
 
     def grid(meta):
-        return (triton.cdiv(total, meta["BLOCK_SIZE"]),)
+        return (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
     _bn2d_kernel[grid](
         input,
-        out,
         weight,
         bias,
         running_mean,
         running_var,
-        total,
+        out,
+        n_elements,
         c,
-        h * w,
+        h,
+        w,
         eps,
         BLOCK_SIZE=1024,
     )
     return out
-
-
-@triton.jit
-def _bn2d_kernel(
-    x_ptr,
-    out_ptr,
-    weight_ptr,
-    bias_ptr,
-    mean_ptr,
-    var_ptr,
-    total: tl.constexpr,
-    channels: tl.constexpr,
-    spatial: tl.constexpr,
-    eps: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < total
-    c = (offsets // spatial) % channels
-
-    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
-    weight = tl.load(weight_ptr + c, mask=mask, other=0.0)
-    bias = tl.load(bias_ptr + c, mask=mask, other=0.0)
-    mean = tl.load(mean_ptr + c, mask=mask, other=0.0)
-    var = tl.load(var_ptr + c, mask=mask, other=1.0)
-
-    y = (x - mean) * tl.rsqrt(var + eps) * weight + bias
-    tl.store(out_ptr + offsets, y, mask=mask)
